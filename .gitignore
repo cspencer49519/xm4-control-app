@@ -536,3 +536,6 @@ Client/linux/sonyheadphonesclient.build/
 # build folders
 build-win/
 build-linux/
+
+# opencode
+.opencode/

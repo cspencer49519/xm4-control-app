@@ -518,20 +518,35 @@ void CrossPlatformGUI::_drawASMControls()
 
         ImGui::Text("Environment Level");
         ImGui::SameLine();
-        ImGui::TextDisabled("(0 = Max NC, 19 = Max Ambient)");
+        ImGui::TextDisabled("%d/19", this->_asmLevel);
 
-        float progress = this->_asmLevel / 19.0f;
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.10f, 0.15f, 0.30f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.0f, 0.52f, 0.84f, 1.0f));
-        ImGui::ProgressBar(progress, ImVec2(-1, 4));
-        ImGui::PopStyleColor(2);
+        float w = ImGui::GetContentRegionAvail().x;
+        float h = 20.0f;
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        float fill = (w > 0.0f) ? this->_asmLevel / 19.0f : 0.0f;
+        float r = h * 0.5f;
 
-        ImGui::SliderInt(
-            "##ambient",
-            &this->_asmLevel,
-            0,
-            19
-        );
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImU32 bgCol = ImColor(0.10f, 0.15f, 0.30f, 1.00f);
+        ImU32 fillCol = ImColor(COLOR_ACCENT);
+        ImU32 thumbCol = IM_COL32(255, 255, 255, 255);
+
+        dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h), bgCol, r);
+        if (fill > 0.0f)
+            dl->AddRectFilled(pos, ImVec2(pos.x + w * fill, pos.y + h), fillCol, r);
+        dl->AddCircleFilled(ImVec2(pos.x + w * fill, pos.y + h * 0.5f), 7.0f, thumbCol);
+
+        ImGui::InvisibleButton("##asmBar", ImVec2(w, h));
+        if (ImGui::IsItemActive())
+        {
+            float mx = ImGui::GetMousePos().x - pos.x;
+            int val = (int)((mx / w) * 19.0f + 0.5f);
+            if (val < 0) val = 0;
+            if (val > 19) val = 19;
+            this->_asmLevel = val;
+        }
+
+        ImGui::SetCursorScreenPos(ImVec2(pos.x, pos.y + h + ImGui::GetStyle().ItemSpacing.y));
 
         if(
         this->_headphones
