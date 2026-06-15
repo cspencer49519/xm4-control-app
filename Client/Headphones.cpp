@@ -125,14 +125,9 @@ std::pair<int, int> Headphones::getConnectedDevices()
 	return {this->_dev1.current, this->_dev2.current};
 }
 
-void Headphones::setMultiPointConnection(int connectionId, int newDevice, int oldDevice)
+void Headphones::setMultiPointConnection(int connectionId, int newDevice)
 {
-	Property<int>* dev = & this->_dev1;
-
-	if (connectionId==1)
-		dev = & this->_dev1;
-	else
-		dev = & this->_dev2;
+	Property<int>* dev = (connectionId == 1) ? &this->_dev1 : &this->_dev2;
 
 	std::lock_guard guard(this->_propertyMtx);
 	dev->desired = newDevice;
@@ -162,6 +157,7 @@ inline void Headphones::connect(int deviceIdx)
 
 bool Headphones::isChanged()
 {
+	std::lock_guard guard(this->_propertyMtx);
 	return !(this->_ambientSoundControl.isFulfilled() && 
 		this->_asmLevel.isFulfilled() &&
 		this->_focusOnVoice.isFulfilled() &&
@@ -225,18 +221,14 @@ void Headphones::setChanges()
 		auto ncAsmEffect = this->_ambientSoundControl.desired ? NC_ASM_EFFECT::ADJUSTMENT_COMPLETION : NC_ASM_EFFECT::OFF;
 		auto asmId = this->_focusOnVoice.desired ? ASM_ID::VOICE : ASM_ID::NORMAL;
 		auto asmLevel = this->_ambientSoundControl.desired ? this->_asmLevel.desired : ASM_LEVEL_DISABLED;
-		printf("Sending NC/ASM command\n");
-
 		auto packet =
-   		CommandSerializer::serializeNcAndAsmSetting(
+    		CommandSerializer::serializeNcAndAsmSetting(
         ncAsmEffect,
         NC_ASM_SETTING_TYPE::LEVEL_ADJUSTMENT,
         ASM_SETTING_TYPE::LEVEL_ADJUSTMENT,
         asmId,
         asmLevel
 		);
-
-		printf("NC/ASM packet\n");
 
 		this->_conn.sendCommand(packet);
 		std::lock_guard guard(this->_propertyMtx);
@@ -271,14 +263,11 @@ void Headphones::setChanges()
 				throw std::logic_error("it's impossible that both values were changed to zero and were also previously zero");
 			}
 		}
-		printf("Sending NC/ASM command\n");
 		auto packet =
 			CommandSerializer::serializeVPTSetting(
 				command,
 				preset
 		);
-
-		printf("VPT packet\n");
 
 		this->_conn.sendCommand(packet);
 

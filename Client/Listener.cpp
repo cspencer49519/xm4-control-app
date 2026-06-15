@@ -1,4 +1,5 @@
 #include "Listener.h"
+#include <iostream>
 
 Listener::Listener(Headphones& headphones, BluetoothWrapper& bt): 
 _headphones(headphones),
@@ -7,11 +8,17 @@ _bt(bt)
 
 void Listener::listen()
 {
-    std::cout << "Listener registered." << std::endl;
     for(;;)
     {
-        Buffer reply = this->_bt.readReplies();
-        this->handle_message(reply);
+        try
+        {
+            Buffer reply = this->_bt.readReplies();
+            this->handle_message(reply);
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "Listener error: " << e.what() << std::endl;
+        }
     }
 }
 

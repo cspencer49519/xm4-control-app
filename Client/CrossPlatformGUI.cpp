@@ -329,6 +329,7 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
             {
                 this->_connectFuture
                 .get();
+                this->resetUIState();
             }
             catch(
                 const RecoverableException&
@@ -447,7 +448,10 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
                 150,
                 35
             )
-        )
+        ) &&
+        !this
+        ->_connectedDevicesFuture
+        .valid()
     )
     {
         selectedDevice=-1;
@@ -504,16 +508,12 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
 
 void CrossPlatformGUI::_drawASMControls()
 {
-    static bool ambientSoundControl=true;
-    static bool focusOnVoice=false;
-    static int asmLevel=0;
-
     ImGui::Checkbox(
         "Enable Ambient Sound",
-        &ambientSoundControl
+        &this->_ambientSoundControl
     );
 
-    if(ambientSoundControl)
+    if(this->_ambientSoundControl)
     {
         ImGui::Indent();
 
@@ -523,7 +523,7 @@ void CrossPlatformGUI::_drawASMControls()
 
         ImGui::SliderInt(
             "##ambient",
-            &asmLevel,
+            &this->_asmLevel,
             0,
             19
         );
@@ -535,7 +535,7 @@ void CrossPlatformGUI::_drawASMControls()
         {
             ImGui::Checkbox(
                 "Focus on Voice",
-                &focusOnVoice
+                &this->_focusOnVoice
             );
         }
         else
@@ -550,18 +550,25 @@ void CrossPlatformGUI::_drawASMControls()
 
     this->_headphones
         .setAmbientSoundControl(
-            ambientSoundControl
+            this->_ambientSoundControl
         );
 
     this->_headphones
         .setAsmLevel(
-            asmLevel
+            this->_asmLevel
         );
 
     this->_headphones
         .setFocusOnVoice(
-            focusOnVoice
+            this->_focusOnVoice
         );
+}
+
+void CrossPlatformGUI::resetUIState()
+{
+    this->_ambientSoundControl = true;
+    this->_focusOnVoice = false;
+    this->_asmLevel = 0;
 }
 
 
@@ -619,7 +626,6 @@ void CrossPlatformGUI::_drawOptimizerButton()
 		}
 	}
 	else {
-		// TODO: Change button to show cancel option while optimizing state
 		if (ImGui::Button("Optimizing... (Press To Cancel)"))
 		{
 			this->_headphones.setOptimizerState(OPTIMIZER_STATE::IDLE);
@@ -687,7 +693,7 @@ void CrossPlatformGUI::_drawMultiPointConn()
 			ImGui::SameLine();
 			if (ImGui::Button("Disconnect device 1"))
 			{
-				this->_headphones.setMultiPointConnection(1, 0, dev1);
+				this->_headphones.setMultiPointConnection(1, 0);
 			}
 		}
 
@@ -707,11 +713,11 @@ void CrossPlatformGUI::_drawMultiPointConn()
 						if (devices[dev1].name=="")
 						{
 							dev1 = i;
-							this->_headphones.setMultiPointConnection(1, dev1, 0);
+							this->_headphones.setMultiPointConnection(1, dev1);
 						}
 						else {
 							dev2 = i;
-							this->_headphones.setMultiPointConnection(2, dev2, 0);
+							this->_headphones.setMultiPointConnection(2, dev2);
 						}
 					}
 
@@ -735,7 +741,7 @@ void CrossPlatformGUI::_drawMultiPointConn()
 			ImGui::SameLine();
 			if (ImGui::Button("Disconnect device 2"))
 			{
-				this->_headphones.setMultiPointConnection(2,0,dev2);				
+				this->_headphones.setMultiPointConnection(2,0);				
 			}
 		}
 		

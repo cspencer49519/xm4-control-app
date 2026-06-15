@@ -31,6 +31,7 @@ public:
 	//Run the GUI code once. This function should be called from a loop from one of the GUI impls (Windows, OSX, Linux...)
 	//O: true if the user wants to close the window
 	bool performGUIPass();
+	void resetUIState();
 private:
 	void _drawErrors();
 	void _drawDeviceDiscovery();
@@ -51,6 +52,10 @@ private:
 	// Listener _listener;
 	std::unique_ptr<Listener> _listener;
 	std::future<void> _listenerFuture;
+
+	bool _ambientSoundControl = true;
+	bool _focusOnVoice = false;
+	int _asmLevel = 0;
 };
 
 

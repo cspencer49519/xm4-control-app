@@ -4,7 +4,6 @@
 #include "BluetoothWrapper.h"
 #include "Constants.h"
 
-#include <iostream>
 #include <mutex>
 #include <vector>
 #include <tuple>
@@ -51,7 +50,7 @@ public:
 	bool getMultiPointSetting();
 	const std::vector<BluetoothDevice>& getDevices();
 	std::pair<int, int> getConnectedDevices();
-	void setMultiPointConnection(int connectionId, int newDevice, int oldDevice);
+	void setMultiPointConnection(int connectionId, int newDevice);
 	inline void disconnect(int deviceIdx);
 	inline void connect(int deviceIdx);
 

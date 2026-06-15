@@ -131,9 +131,6 @@ Buffer BluetoothWrapper::readReplies()
 	} while (!messageFinished);
 
 	return msgBytes;
-
-	auto msg = CommandSerializer::unpackBtMessage(msgBytes);
-	this->_seqNumber = msg.seqNumber;
 }
 
 void BluetoothWrapper::setSeqNumber(unsigned char seqNumber)
