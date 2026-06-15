@@ -250,7 +250,6 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
         {
             selectedDevice=-1;
             this->_listenerActive = false;
-            this->_listener.reset();
 
             this->_bt.disconnect();
 
@@ -260,6 +259,8 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
                     std::chrono::milliseconds(LISTENER_TIMEOUT_MS)
                 );
             }
+
+            this->_listener.reset();
         }
 
         return;

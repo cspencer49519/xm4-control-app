@@ -7,12 +7,17 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <errno.h>
 
 #include <sys/socket.h>
+#include <sys/poll.h>
+#include <fcntl.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/rfcomm.h>
 
 #include "DBusHelper.h"
+
+constexpr int CONNECT_TIMEOUT_SEC = 10;
 
 LinuxBluetoothConnector::LinuxBluetoothConnector()
 {
@@ -40,29 +45,35 @@ int LinuxBluetoothConnector::send(char *buf, size_t length)
 
 void LinuxBluetoothConnector::connect(const std::string &addrStr)
 {
-
   struct sockaddr_rc addr = {0};
-  int status;
   const char *dest = addrStr.c_str();
 
-  // allocate a socket
-  this->_socket = ::socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM);
+  int sock = ::socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM);
+  if (sock < 0)
+    throw RecoverableException("Error: could not create bluetooth socket", true);
+
+  this->_socket = sock;
+
+  struct timeval timeout;
+  timeout.tv_sec = CONNECT_TIMEOUT_SEC;
+  timeout.tv_usec = 0;
+  setsockopt(this->_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  setsockopt(this->_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
   uint32_t linkmode = RFCOMM_LM_AUTH | RFCOMM_LM_ENCRYPT;
-  int sl = sizeof(linkmode);
-  setsockopt(this->_socket, SOL_RFCOMM, RFCOMM_LM, &linkmode, sl);
+  setsockopt(this->_socket, SOL_RFCOMM, RFCOMM_LM, &linkmode, sizeof(linkmode));
 
-  // set the connection parameters (who to connect to)
   addr.rc_family = AF_BLUETOOTH;
   uint8_t channel = sdp_getServiceChannel(addrStr.c_str(), SERVICE_UUID_IN_BYTES);
   addr.rc_channel = channel;
   str2ba(dest, &addr.rc_bdaddr);
 
-  // connect to server
-  status = ::connect(this->_socket, (struct sockaddr *)&addr, sizeof(addr));
+  int status = ::connect(this->_socket, (struct sockaddr *)&addr, sizeof(addr));
 
   if (status < 0)
   {
+    this->_socket = -1;
+    ::close(sock);
     throw RecoverableException("Error: could not connect to bluetooth socket", true);
   }
   this->_connected = true;
