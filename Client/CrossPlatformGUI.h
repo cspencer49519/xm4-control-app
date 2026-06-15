@@ -15,12 +15,26 @@
 #include <iostream>
 #include <future>
 #include <string>
+#include <cmath>
+#include <atomic>
 
+//--- UI Constants ---
 constexpr auto GUI_MAX_MESSAGES = 5;
 constexpr auto FPS = 60;
 constexpr auto MS_PER_FRAME = 1000 / FPS;
 constexpr auto FONT_SIZE = 15.0f;
-const auto WINDOW_COLOR = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+constexpr auto BUTTON_WIDTH = 150.0f;
+constexpr auto BUTTON_HEIGHT = 35.0f;
+constexpr auto SECTION_SPACING = 8.0f;
+
+// Sony-inspired color palette
+const auto COLOR_TEXT      = ImVec4(0.95f, 0.95f, 0.95f, 1.00f);
+const auto COLOR_SUCCESS   = ImVec4(0.20f, 0.90f, 0.30f, 1.00f);
+const auto COLOR_ERROR     = ImVec4(1.00f, 0.30f, 0.30f, 1.00f);
+const auto COLOR_WARNING   = ImVec4(1.00f, 0.80f, 0.00f, 1.00f);
+const auto COLOR_CONNECTED = ImVec4(0.20f, 0.80f, 0.30f, 1.00f);
+const auto COLOR_ACCENT    = ImVec4(0.00f, 0.52f, 0.84f, 1.00f); // Sony blue
+const auto COLOR_BG_DARK   = ImVec4(0.06f, 0.06f, 0.07f, 1.00f);
 
 //This class should be constructed after AFTER the Dear ImGUI context is initialized.
 class CrossPlatformGUI
@@ -41,6 +55,12 @@ private:
 	void _drawOptimizerButton();
 	void _drawSpeakToChat();
 	void _drawMultiPointConn();
+	void _drawBattery();
+	void _drawSpinner(const char* label);
+
+	static int _spinnerFrame();
+
+	std::atomic<bool> _listenerActive{ true };
 
 	BluetoothDevice _connectedDevice;
 	BluetoothWrapper _bt;
@@ -49,7 +69,7 @@ private:
 	SingleInstanceFuture<void> _connectFuture;
 	TimedMessageQueue _mq;
 	Headphones _headphones;
-	// Listener _listener;
+
 	std::unique_ptr<Listener> _listener;
 	std::future<void> _listenerFuture;
 
@@ -57,5 +77,3 @@ private:
 	bool _focusOnVoice = false;
 	int _asmLevel = 0;
 };
-
-

@@ -1,14 +1,25 @@
 #include "CrossPlatformGUI.h"
 
+constexpr auto LISTENER_TIMEOUT_MS = 2000;
+constexpr auto FUTURE_TIMEOUT_MS = 8000;
+
+int CrossPlatformGUI::_spinnerFrame()
+{
+    return static_cast<int>(ImGui::GetTime() * 6.0f) & 3;
+}
+
+void CrossPlatformGUI::_drawSpinner(const char* label)
+{
+    static const char chars[] = { '|', '/', '-', '\\' };
+    int frame = _spinnerFrame();
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%c %s", chars[frame], label);
+    ImGui::Text("%s", buf);
+}
+
 bool CrossPlatformGUI::performGUIPass()
 {
-    //ImGui::NewFrame();
-
     bool open = true;
-
-    //-----------------------------------------
-    // estilo
-    //-----------------------------------------
 
     ImGuiStyle& style = ImGui::GetStyle();
 
@@ -57,22 +68,17 @@ bool CrossPlatformGUI::performGUIPass()
 
     ImGui::SetWindowFontScale(1.0f);
 
-    ImGui::Separator();
-
     if(this->_bt.isConnected())
     {
-        ImGui::Text("Status:");
         ImGui::SameLine();
+        ImGui::Text("  ");
+        ImGui::SameLine();
+        ImGui::TextColored(COLOR_SUCCESS, "[Connected]");
 
-        ImGui::TextColored(
-            ImVec4(
-                0.2f,
-                0.9f,
-                0.3f,
-                1.0f
-            ),
-            "CONNECTED"
-        );
+        ImGui::SameLine();
+        ImGui::Dummy(ImVec2(20,0));
+        ImGui::SameLine();
+        this->_drawBattery();
 
         ImGui::Text(
             "Device: %s",
@@ -81,97 +87,88 @@ bool CrossPlatformGUI::performGUIPass()
     }
     else
     {
-        ImGui::Text("Status:");
         ImGui::SameLine();
-
-        ImGui::TextColored(
-            ImVec4(
-                0.9f,
-                0.2f,
-                0.2f,
-                1.0f
-            ),
-            "DISCONNECTED"
-        );
+        ImGui::Text("  ");
+        ImGui::SameLine();
+        ImGui::TextColored(COLOR_ERROR, "[Disconnected]");
     }
 
-    ImGui::Spacing();
+    ImGui::Dummy(ImVec2(0, SECTION_SPACING));
 
-    ImGui::Separator();
+    //-----------------------------------------
+    // Connection
+    //-----------------------------------------
 
-    ImGui::Text("Connection");
+    if (ImGui::CollapsingHeader("Connection", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        this->_drawErrors();
+        this->_drawDeviceDiscovery();
+    }
 
-    ImGui::Separator();
-
-    this->_drawErrors();
-
-    this->_drawDeviceDiscovery();
-
+    //-----------------------------------------
+    // Device controls (only when connected)
     //-----------------------------------------
 
     if(this->_bt.isConnected())
-{
-    unsigned int cap =
-        this->_headphones
-        .getCapabilities();
-
-    if(cap & DEVICE_CAPABILITIES::NC_ASM)
     {
-        ImGui::Spacing();
-        ImGui::Separator();
+        if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_None))
+        {
+            unsigned int cap = this->_headphones.getCapabilities();
 
-        ImGui::Text(
-            "Noise Control"
-        );
+            if (cap & (DEVICE_CAPABILITIES::NC_ASM | DEVICE_CAPABILITIES::VPT |
+                       DEVICE_CAPABILITIES::SPEAK_TO_CHAT | DEVICE_CAPABILITIES::OPTIMIZER))
+            {
+                if (ImGui::BeginTabItem("Audio"))
+                {
+                    if(cap & DEVICE_CAPABILITIES::NC_ASM)
+                    {
+                        if (ImGui::CollapsingHeader("Noise Control", ImGuiTreeNodeFlags_DefaultOpen))
+                            this->_drawASMControls();
+                    }
 
-        ImGui::Separator();
+                    if(cap & DEVICE_CAPABILITIES::VPT)
+                    {
+                        if (ImGui::CollapsingHeader("Spatial Audio", ImGuiTreeNodeFlags_DefaultOpen))
+                            this->_drawSurroundControls();
+                    }
 
-        this->_drawASMControls();
+                    if(cap & DEVICE_CAPABILITIES::SPEAK_TO_CHAT)
+                        this->_drawSpeakToChat();
+
+                    if(cap & DEVICE_CAPABILITIES::OPTIMIZER)
+                    {
+                        ImGui::Dummy(ImVec2(0, SECTION_SPACING));
+                        this->_drawOptimizerButton();
+                    }
+
+                    ImGui::EndTabItem();
+                }
+            }
+
+            if(cap & DEVICE_CAPABILITIES::MULTI_POINT)
+            {
+                if (ImGui::BeginTabItem("Devices"))
+                {
+                    this->_drawMultiPointConn();
+                    ImGui::EndTabItem();
+                }
+            }
+
+            ImGui::EndTabBar();
+        }
     }
 
-    if(cap & DEVICE_CAPABILITIES::VPT)
-    {
-        ImGui::Spacing();
-        ImGui::Separator();
-
-        ImGui::Text(
-            "Spatial Audio"
-        );
-
-        ImGui::Separator();
-
-        this->_drawSurroundControls();
-    }
-
-    if(cap & DEVICE_CAPABILITIES::SPEAK_TO_CHAT)
-    {
-        ImGui::Spacing();
-        ImGui::Separator();
-
-        this->_drawSpeakToChat();
-    }
-
-    if(cap & DEVICE_CAPABILITIES::MULTI_POINT)
-    {
-        ImGui::Spacing();
-        ImGui::Separator();
-
-        this->_drawMultiPointConn();
-    }
-
-    if(cap & DEVICE_CAPABILITIES::OPTIMIZER)
-    {
-        ImGui::Spacing();
-        ImGui::Separator();
-
-        this->_drawOptimizerButton();
-    }
+    //-----------------------------------------
+    // Commands
+    //-----------------------------------------
 
     this->_setHeadphoneSettings();
-    }
-    ImGui::Spacing();
 
-    ImGui::Separator();
+    //-----------------------------------------
+    // Footer
+    //-----------------------------------------
+
+    ImGui::Dummy(ImVec2(0, SECTION_SPACING));
 
     ImGui::TextDisabled(
         "Unofficial Sony client"
@@ -181,37 +178,29 @@ bool CrossPlatformGUI::performGUIPass()
 
     if(!open)
     {
-        // detener listener primero
-        this->_listener.reset();
-
-        // cerrar bluetooth para desbloquear reads
+        this->_listenerActive = false;
         this->_bt.disconnect();
 
-        // no esperar eternamente
         if(this->_listenerFuture.valid())
         {
             this->_listenerFuture.wait_for(
-                std::chrono::milliseconds(200)
+                std::chrono::milliseconds(LISTENER_TIMEOUT_MS)
             );
         }
 
+        this->_listener.reset();
         return false;
     }
 
-    //ImGui::Render();
-
     return open;
-    }
+}
 
 
 void CrossPlatformGUI::_drawErrors()
 {
     if (this->_mq.begin() != this->_mq.end())
     {
-        ImGui::TextColored(
-            ImVec4(1.0f,0.3f,0.3f,1.0f),
-            "Errors:"
-        );
+        ImGui::TextColored(COLOR_ERROR, "Errors:");
 
         ImGui::Spacing();
 
@@ -227,48 +216,40 @@ void CrossPlatformGUI::_drawErrors()
     }
 }
 
+void CrossPlatformGUI::_drawBattery()
+{
+    ImGui::TextColored(COLOR_TEXT, "[Battery: N/A]");
+}
+
 void CrossPlatformGUI::_drawDeviceDiscovery()
 {
     static std::vector<BluetoothDevice>
         connectedDevices;
 
     static int selectedDevice=-1;
+    static auto connectStart = std::chrono::steady_clock::now();
 
     //---------------------------------
-    // Ya conectado
+    // Already connected
     //---------------------------------
 
     if(this->_bt.isConnected())
     {
-        ImGui::Text(
-            "Connected to:"
-        );
-
-        ImGui::SameLine();
-
-        ImGui::TextColored(
-            ImVec4(
-                0.2f,
-                0.8f,
-                0.3f,
-                1.0f
-            ),
-            "%s",
-            this->_connectedDevice
-            .name.c_str()
-        );
+        ImGui::TextColored(COLOR_CONNECTED, "Connected to: %s",
+            this->_connectedDevice.name.c_str());
 
         if(
             ImGui::Button(
                 "Disconnect",
                 ImVec2(
-                    150,
-                    35
+                    BUTTON_WIDTH,
+                    BUTTON_HEIGHT
                 )
             )
         )
         {
             selectedDevice=-1;
+            this->_listenerActive = false;
             this->_listener.reset();
 
             this->_bt.disconnect();
@@ -276,17 +257,16 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
             if(this->_listenerFuture.valid())
             {
                 this->_listenerFuture.wait_for(
-                    std::chrono::milliseconds(200)
+                    std::chrono::milliseconds(LISTENER_TIMEOUT_MS)
                 );
             }
-
         }
 
         return;
     }
 
     //---------------------------------
-    // Lista dispositivos
+    // Device list
     //---------------------------------
 
     ImGui::Text(
@@ -312,7 +292,7 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
     ImGui::Spacing();
 
     //---------------------------------
-    // Estado conexión
+    // Connection state
     //---------------------------------
 
     if(
@@ -320,7 +300,14 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
         .valid()
     )
     {
-        if(
+        bool timedOut = false;
+        auto elapsed = std::chrono::steady_clock::now() - connectStart;
+        if (elapsed > std::chrono::milliseconds(FUTURE_TIMEOUT_MS))
+        {
+            timedOut = true;
+        }
+
+        if (
             this->_connectFuture
             .ready()
         )
@@ -350,11 +337,14 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
                 );
             }
         }
+        else if (timedOut)
+        {
+            this->_mq.addMessage("Connection timed out");
+            this->_connectFuture = SingleInstanceFuture<void>();
+        }
         else
         {
-            ImGui::Text(
-                "Connecting..."
-            );
+            this->_drawSpinner("Connecting...");
         }
     }
     else
@@ -363,8 +353,8 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
             ImGui::Button(
                 "Connect",
                 ImVec2(
-                    150,
-                    35
+                    BUTTON_WIDTH,
+                    BUTTON_HEIGHT
                 )
             )
         )
@@ -378,6 +368,8 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
                         selectedDevice
                     ];
 
+                connectStart = std::chrono::steady_clock::now();
+
                 this->_connectFuture
                 .setFromAsync(
                 [this]()
@@ -388,10 +380,7 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
                         .mac
                     );
 
-                    //--------------------------------
-                    // crear listener
-                    //--------------------------------
-
+                    this->_listenerActive = true;
                     this->_listener=
                     std::make_unique<
                         Listener
@@ -399,7 +388,9 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
                         this
                         ->_headphones,
                         this
-                        ->_bt
+                        ->_bt,
+                        this
+                        ->_listenerActive
                     );
 
                     this
@@ -415,8 +406,6 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
                         ->_listener
                         .get()
                     );
-
-                    //--------------------------------
 
                     if(
                         this
@@ -445,8 +434,8 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
         ImGui::Button(
             "Refresh",
             ImVec2(
-                150,
-                35
+                BUTTON_WIDTH,
+                BUTTON_HEIGHT
             )
         ) &&
         !this
@@ -469,7 +458,7 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
     }
 
     //---------------------------------
-    // Obtener resultados
+    // Get results
     //---------------------------------
 
     if(
@@ -517,9 +506,15 @@ void CrossPlatformGUI::_drawASMControls()
     {
         ImGui::Indent();
 
-        ImGui::Text(
-            "Environment Level"
-        );
+        ImGui::Text("Environment Level");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(0 = Max NC, 19 = Max Ambient)");
+
+        float progress = this->_asmLevel / 19.0f;
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.10f, 0.15f, 0.30f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.0f, 0.52f, 0.84f, 1.0f));
+        ImGui::ProgressBar(progress, ImVec2(-1, 4));
+        ImGui::PopStyleColor(2);
 
         ImGui::SliderInt(
             "##ambient",
@@ -620,13 +615,13 @@ void CrossPlatformGUI::_drawOptimizerButton()
 {
 	if (this->_headphones.getOptimizerState() == OPTIMIZER_STATE::IDLE)
 	{
-		if (ImGui::Button("Optimize"))
+		if (ImGui::Button("Optimize", ImVec2(BUTTON_WIDTH, BUTTON_HEIGHT)))
 		{
 			this->_headphones.setOptimizerState(OPTIMIZER_STATE::OPTIMIZING);
 		}
 	}
 	else {
-		if (ImGui::Button("Optimizing... (Press To Cancel)"))
+		if (ImGui::Button("Cancel Optimization", ImVec2(BUTTON_WIDTH, BUTTON_HEIGHT)))
 		{
 			this->_headphones.setOptimizerState(OPTIMIZER_STATE::IDLE);
 		}
@@ -635,44 +630,40 @@ void CrossPlatformGUI::_drawOptimizerButton()
 
 void CrossPlatformGUI::_drawSpeakToChat()
 {
-	enum Sensitivity { Sens_Auto, Sens_High, Sens_Low, Sens_count};
-	const char* Sens_hints[Sens_count] = { "Auto", "High", "Low" };
-
-	enum AutoOff { Time_Short, Time_Std, Time_Long, Time_Inf, Time_count};
-	const char* Time_hints[Time_count] = { "Short", "Standard", "Long", "Off" };
-
-	static bool S2Ctoggle_check = false;
-	static int S2C_Sens = Sens_Auto;
-	static bool S2C_Voice = 0;
-	static int S2C_AutoOff = Time_Short;
-	
-	const char* Sens_name = (S2C_Sens >= 0 && S2C_Sens < Sens_count) ? Sens_hints[S2C_Sens] : "Unknown";
-	const char* Time_name = (S2C_AutoOff >= 0 && S2C_AutoOff < Time_count) ? Time_hints[S2C_AutoOff] : "Unknown";
-
-	if (ImGui::CollapsingHeader("Speak To Chat Controls", ImGuiTreeNodeFlags_DefaultOpen))
+	if (ImGui::CollapsingHeader("Speak To Chat", ImGuiTreeNodeFlags_DefaultOpen))
 	{
+		enum Sensitivity { Sens_Auto, Sens_High, Sens_Low, Sens_count};
+		const char* Sens_hints[Sens_count] = { "Auto", "High", "Low" };
+
+		enum AutoOff { Time_Short, Time_Std, Time_Long, Time_Inf, Time_count};
+		const char* Time_hints[Time_count] = { "Short", "Standard", "Long", "Off" };
+
+		static bool S2Ctoggle_check = false;
+		static int S2C_Sens = Sens_Auto;
+		static bool S2C_Voice = 0;
+		static int S2C_AutoOff = Time_Short;
+
+		const char* Sens_name = (S2C_Sens >= 0 && S2C_Sens < Sens_count) ? Sens_hints[S2C_Sens] : "Unknown";
+		const char* Time_name = (S2C_AutoOff >= 0 && S2C_AutoOff < Time_count) ? Time_hints[S2C_AutoOff] : "Unknown";
+
 		ImGui::Checkbox("Speak To Chat", &S2Ctoggle_check);
 
 		if (S2Ctoggle_check)
 		{
-			if (S2Ctoggle_check){
-				// ImGui::SameLine();
-				ImGui::SliderInt("Speak to chat sensitivity", &S2C_Sens, 0, Sens_count - 1, Sens_name);
-				ImGui::SliderInt("Speak to chat Auto close", &S2C_AutoOff, 0, Time_count - 1, Time_name);
-				ImGui::Checkbox("Voice passthrough", &S2C_Voice);
-			}
-			else {
-			}
+			ImGui::Indent();
+			ImGui::SliderInt("Sensitivity", &S2C_Sens, 0, Sens_count - 1, Sens_name);
+			ImGui::SliderInt("Auto close", &S2C_AutoOff, 0, Time_count - 1, Time_name);
+			ImGui::Checkbox("Voice passthrough", &S2C_Voice);
+			ImGui::Unindent();
 		}
+
+		if (S2Ctoggle_check)
+			this->_headphones.setS2CToggle(S2C_TOGGLE::ACTIVE);
+		else
+			this->_headphones.setS2CToggle(S2C_TOGGLE::INACTIVE);
+
+		this->_headphones.setS2COptions(S2C_Sens, S2C_Voice, S2C_AutoOff);
 	}
-
-	if (S2Ctoggle_check)
-		this->_headphones.setS2CToggle(S2C_TOGGLE::ACTIVE);
-	else
-		this->_headphones.setS2CToggle(S2C_TOGGLE::INACTIVE);
-
-	this->_headphones.setS2COptions(S2C_Sens, S2C_Voice, S2C_AutoOff);
-
 }
 
 void CrossPlatformGUI::_drawMultiPointConn()
@@ -682,16 +673,14 @@ void CrossPlatformGUI::_drawMultiPointConn()
 
 	int dev1 = connectedDevices.first;
 	int dev2 = connectedDevices.second;
-	int old_dev1 = dev1;
-	int old_dev2 = dev2;
-	
+
 	if(ImGui::CollapsingHeader("Connected Devices", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		if (devices[dev1].name!="")
 		{
-			ImGui::Text(devices[dev1].name.c_str());
+			ImGui::BulletText("%s", devices[dev1].name.c_str());
 			ImGui::SameLine();
-			if (ImGui::Button("Disconnect device 1"))
+			if (ImGui::Button("Disconnect"))
 			{
 				this->_headphones.setMultiPointConnection(1, 0);
 			}
@@ -699,8 +688,7 @@ void CrossPlatformGUI::_drawMultiPointConn()
 
 		if (devices[dev1].name=="" || devices[dev2].name=="")
 		{
-			// const char* combo_preview_value = devices[dev1].name // &(devices[dev1].name);
-			if (ImGui::BeginCombo("Connect", ""))
+			if (ImGui::BeginCombo("Connect device", ""))
 			{
 				for (int i = 0; i < devices.size(); i++)
 				{
@@ -721,37 +709,35 @@ void CrossPlatformGUI::_drawMultiPointConn()
 						}
 					}
 
-					// Set the initial focus when opening the combo (scrolling + keyboard navigation focus)
 					if (is_selected)
 						ImGui::SetItemDefaultFocus();
 				}
 				ImGui::EndCombo();
 			}
-		
+
 			ImGui::SameLine();
 			if (devices[dev1].name=="")
 				ImGui::Text("Device 1");
-			else 
+			else
 				ImGui::Text("Device 2");
 		}
 
 		if (devices[dev2].name!="")
 		{
-			ImGui::Text(devices[dev2].name.c_str());
+			ImGui::BulletText("%s", devices[dev2].name.c_str());
 			ImGui::SameLine();
-			if (ImGui::Button("Disconnect device 2"))
+			if (ImGui::Button("Disconnect##2"))
 			{
-				this->_headphones.setMultiPointConnection(2,0);				
+				this->_headphones.setMultiPointConnection(2,0);
 			}
 		}
-		
 	}
-
 }
 
 void CrossPlatformGUI::_setHeadphoneSettings()
 {
     static int commandLinger=0;
+    static auto sendStart = std::chrono::steady_clock::now();
 
     if(this->_sendCommandFuture.ready())
     {
@@ -771,13 +757,11 @@ void CrossPlatformGUI::_setHeadphoneSettings()
             if(exc.shouldDisconnect)
             {
                 this->_bt.disconnect();
-
-                excString=
-                "Disconnected: ";
+                excString = "Disconnected: ";
             }
 
             this->_mq.addMessage(
-                excString+
+                excString +
                 exc.what()
             );
         }
@@ -787,14 +771,18 @@ void CrossPlatformGUI::_setHeadphoneSettings()
         .valid()
     )
     {
-        if(
-        commandLinger++
-        >(FPS/10)
+        auto elapsed = std::chrono::steady_clock::now() - sendStart;
+        if (elapsed > std::chrono::milliseconds(FUTURE_TIMEOUT_MS))
+        {
+            this->_mq.addMessage("Command timed out");
+            this->_sendCommandFuture = SingleInstanceFuture<void>();
+        }
+        else if (
+            commandLinger++
+            > (FPS / 10)
         )
         {
-            ImGui::Text(
-                "Sending..."
-            );
+            this->_drawSpinner("Sending...");
         }
     }
     else if(
@@ -802,6 +790,7 @@ void CrossPlatformGUI::_setHeadphoneSettings()
         .isChanged()
     )
     {
+        sendStart = std::chrono::steady_clock::now();
         this->_sendCommandFuture
         .setFromAsync(
         [=,this]()
@@ -844,6 +833,8 @@ _headphones(_bt)
 
     io.WantSaveIniSettings=
         false;
+
+    io.FontGlobalScale = 1.0f;
 
     char* fileData=
     new char[

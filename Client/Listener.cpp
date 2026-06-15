@@ -1,22 +1,25 @@
 #include "Listener.h"
 #include <iostream>
 
-Listener::Listener(Headphones& headphones, BluetoothWrapper& bt): 
+Listener::Listener(Headphones& headphones, BluetoothWrapper& bt, std::atomic<bool>& running): 
 _headphones(headphones),
-_bt(bt)
+_bt(bt),
+_running(running)
 {}
 
 void Listener::listen()
 {
-    for(;;)
+    while (this->_running)
     {
         try
         {
             Buffer reply = this->_bt.readReplies();
+            if (!this->_running) break;
             this->handle_message(reply);
         }
         catch (const std::exception& e)
         {
+            if (!this->_running) break;
             std::cerr << "Listener error: " << e.what() << std::endl;
         }
     }
@@ -39,7 +42,6 @@ void Listener::handle_message(Buffer msg)
     } 
     else if (m.dataType == DATA_TYPE::DATA_MDR || m.dataType == DATA_TYPE::DATA_MDR_NO2) 
     {
-        // Set these values as current values of Headphone property
         this->_headphones.setStateFromReply(m);
         this->_bt.sendAck(m.seqNumber);
     }
