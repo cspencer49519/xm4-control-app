@@ -14,3 +14,5 @@ std::string dbus_get_property(DBusConnection *const connection, const char *devi
 
 uint8_t sdp_getServiceChannel(const char *dev_addr, uint8_t *uuid128);
 
+int dbus_get_battery_level(DBusConnection *connection, const char *device_path);
+

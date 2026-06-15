@@ -77,6 +77,9 @@ void LinuxBluetoothConnector::connect(const std::string &addrStr)
     throw RecoverableException("Error: could not connect to bluetooth socket", true);
   }
   this->_connected = true;
+  this->_mac = addrStr;
+  this->_batteryLevel = -1;
+  this->_batteryQueried = false;
 }
 
 std::vector<BluetoothDevice> LinuxBluetoothConnector::getConnectedDevices()
@@ -114,4 +117,32 @@ void LinuxBluetoothConnector::disconnect() noexcept
 bool LinuxBluetoothConnector::isConnected() noexcept
 {
   return this->_connected;
+}
+
+static std::string _macToDevicePath(const std::string& mac)
+{
+  std::string path = "/org/bluez/hci0/dev_";
+  for (size_t i = 0; i < mac.size(); i++)
+    path += (mac[i] == ':') ? '_' : toupper(mac[i]);
+  return path;
+}
+
+int LinuxBluetoothConnector::getBatteryLevel() const
+{
+  if (!this->_connected)
+    return -1;
+
+  if (this->_batteryQueried)
+    return this->_batteryLevel;
+
+  DBusConnection *connection = dbus_open_system_bus();
+  if (NULL == connection)
+    return -1;
+
+  std::string devicePath = _macToDevicePath(this->_mac);
+  this->_batteryLevel = dbus_get_battery_level(connection, devicePath.c_str());
+  this->_batteryQueried = true;
+
+  dbus_connection_unref(connection);
+  return this->_batteryLevel;
 }

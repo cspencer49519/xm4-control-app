@@ -73,7 +73,7 @@ private:
 	Property<bool> _focusOnVoice = { 0 };
 	Property<int> _asmLevel = { 0 };
 
-	Property<SOUND_POSITION_PRESET> _surroundPosition = { SOUND_POSITION_PRESET::OUT_OF_RANGE, SOUND_POSITION_PRESET::OFF };
+	Property<SOUND_POSITION_PRESET> _surroundPosition = { SOUND_POSITION_PRESET::OFF, SOUND_POSITION_PRESET::OFF };
 	Property<int> _vptType = { 0 };
 
 	Property<OPTIMIZER_STATE> _optimizerState = { OPTIMIZER_STATE::IDLE };

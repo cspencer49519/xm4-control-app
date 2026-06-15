@@ -35,18 +35,14 @@ void EnterGUIMainLoop(BluetoothWrapper bt)
         fprintf(stderr, "Failed to initialize GLFW\n");
         return;
     }
+
     const char *glsl_version = "#version 130";
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 
-    // Create window with graphics context
-    //GLFWwindow *window = glfwCreateWindow(GUI_WIDTH, GUI_HEIGHT, APP_NAME, NULL, NULL);
-    //if (window == NULL)
-    //    return;
-    // tamaño inicial más razonable
     GLFWwindow *window = glfwCreateWindow(
-        780,
-        700,
+        GUI_WIDTH,
+        GUI_HEIGHT,
         APP_NAME,
         NULL,
         NULL
@@ -68,25 +64,15 @@ void EnterGUIMainLoop(BluetoothWrapper bt)
 
     ImGuiIO &io = ImGui::GetIO();
     (void)io;
-    //io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
-    //io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
 
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
-    //ImGui::StyleColorsClassic();
 
     // Setup Platform/Renderer backends
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    //ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
-    ImVec4 clear_color = ImVec4(
-    0.06f,
-    0.06f,
-    0.07f,
-    1.0f
-    );
-
+    ImVec4 clear_color = COLOR_BG_DARK;
 
     // Main loop
     while (!glfwWindowShouldClose(window))
@@ -99,6 +85,12 @@ void EnterGUIMainLoop(BluetoothWrapper bt)
         ImGui::NewFrame();
 
         GUI.performGUIPass();
+
+        if (glfwWindowShouldClose(window))
+        {
+            GUI.cleanup();
+            break;
+        }
 
         ImGui::Render();
 

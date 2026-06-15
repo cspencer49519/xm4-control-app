@@ -15,9 +15,13 @@ public:
 	virtual void disconnect() noexcept;
 	virtual bool isConnected() noexcept;
 	virtual std::vector<BluetoothDevice> getConnectedDevices() noexcept(false);
+	virtual int getBatteryLevel() const;
 
 
 private:
 	int _socket = -1;
 	std::atomic<bool> _connected = false;
+	mutable int _batteryLevel = -1;
+	mutable bool _batteryQueried = false;
+	std::string _mac;
 };

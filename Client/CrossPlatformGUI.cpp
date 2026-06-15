@@ -178,17 +178,7 @@ bool CrossPlatformGUI::performGUIPass()
 
     if(!open)
     {
-        this->_listenerActive = false;
-        this->_bt.disconnect();
-
-        if(this->_listenerFuture.valid())
-        {
-            this->_listenerFuture.wait_for(
-                std::chrono::milliseconds(LISTENER_TIMEOUT_MS)
-            );
-        }
-
-        this->_listener.reset();
+        this->cleanup();
         return false;
     }
 
@@ -216,9 +206,28 @@ void CrossPlatformGUI::_drawErrors()
     }
 }
 
+void CrossPlatformGUI::cleanup()
+{
+    this->_listenerActive = false;
+    this->_bt.disconnect();
+
+    if(this->_listenerFuture.valid())
+    {
+        this->_listenerFuture.wait_for(
+            std::chrono::milliseconds(LISTENER_TIMEOUT_MS)
+        );
+    }
+
+    this->_listener.reset();
+}
+
 void CrossPlatformGUI::_drawBattery()
 {
-    ImGui::TextColored(COLOR_TEXT, "[Battery: N/A]");
+    int level = this->_bt.getBatteryLevel();
+    if (level >= 0)
+        ImGui::TextColored(COLOR_TEXT, "[Battery: %d%%]", level);
+    else
+        ImGui::TextColored(COLOR_TEXT, "[Battery: N/A]");
 }
 
 void CrossPlatformGUI::_drawDeviceDiscovery()
@@ -787,6 +796,7 @@ void CrossPlatformGUI::_setHeadphoneSettings()
         }
     }
     else if(
+        this->_bt.isConnected() &&
         this->_headphones
         .isChanged()
     )

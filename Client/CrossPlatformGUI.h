@@ -45,6 +45,7 @@ public:
 	//Run the GUI code once. This function should be called from a loop from one of the GUI impls (Windows, OSX, Linux...)
 	//O: true if the user wants to close the window
 	bool performGUIPass();
+	void cleanup();
 	void resetUIState();
 private:
 	void _drawErrors();

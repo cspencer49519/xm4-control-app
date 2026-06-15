@@ -33,6 +33,7 @@ public:
 	void disconnect() noexcept;
 
 	std::vector<BluetoothDevice> getConnectedDevices();
+	int getBatteryLevel() const { return _connector->getBatteryLevel(); }
 	void setSeqNumber(unsigned char seqNumber);
 	void postAck();
 

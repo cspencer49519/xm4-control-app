@@ -1,4 +1,5 @@
 #include "BluetoothWrapper.h"
+#include <chrono>
 
 BluetoothWrapper::BluetoothWrapper(std::unique_ptr<IBluetoothConnector> connector)
 {
@@ -25,9 +26,11 @@ BluetoothWrapper& BluetoothWrapper::operator=(BluetoothWrapper&& other) noexcept
 int BluetoothWrapper::sendCommand(const std::vector<char>& bytes, DATA_TYPE dtype)
 {
 	int bytesSent;
-	std::lock_guard guard(this->_connectorMtx);
-	auto data = CommandSerializer::packageDataForBt(bytes, dtype, this->_seqNumber);
-	bytesSent = this->_connector->send(data.data(), data.size());
+	{
+		std::lock_guard guard(this->_connectorMtx);
+		auto data = CommandSerializer::packageDataForBt(bytes, dtype, this->_seqNumber);
+		bytesSent = this->_connector->send(data.data(), data.size());
+	}
 
 	if (dtype != DATA_TYPE::ACK)
 		this->_waitForAck();
@@ -68,11 +71,11 @@ void BluetoothWrapper::_waitForAck()
 {
 	std::unique_lock<std::mutex> guard(this->_dataMtx);
 
-	while (!(this->_ackBuffer > 0)){
-		this->_ack.wait(guard);
-	}
+	if (!(this->_ackBuffer > 0))
+		this->_ack.wait_for(guard, std::chrono::seconds(5));
 
-	this->_ackBuffer--;
+	if (this->_ackBuffer > 0)
+		this->_ackBuffer--;
 }
 
 void BluetoothWrapper::postAck()
@@ -93,11 +96,12 @@ Buffer BluetoothWrapper::readReplies()
 		int i = 0;
 		while(!messageFinished)
 		{
-			this->_connector->recv(buf+i, 1);
+			int n = this->_connector->recv(buf+i, 1);
+			if (n <= 0)
+				throw RecoverableException("Connection closed", true);
 			i++;
-			if (buf[i-1] == 0x3c) 
+			if (buf[i-1] == 0x3c)
 				messageFinished = true;
-				// break;
 		}
 		auto numRecvd = i;
 		size_t messageStart = 0;

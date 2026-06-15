@@ -46,4 +46,6 @@ public:
 
 	//getConnectedDevices can block.
 	virtual std::vector<BluetoothDevice> getConnectedDevices() = 0;
+
+	virtual int getBatteryLevel() const { return -1; }
 };

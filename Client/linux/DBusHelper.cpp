@@ -276,6 +276,71 @@ clean_up:
     return ret;
 }
 
+int dbus_get_battery_level(DBusConnection *connection, const char *device_path)
+{
+    DBusError error;
+    DBusMessage *msg = NULL;
+    DBusMessage *rsp = NULL;
+    DBusMessageIter args, subargs;
+    int ret = -1;
+
+    dbus_error_init(&error);
+
+    msg = dbus_message_new_method_call("org.bluez",
+                                       device_path,
+                                       "org.freedesktop.DBus.Properties",
+                                       "Get");
+    if (NULL == msg)
+        return -1;
+
+    char const *const battery_interface = "org.bluez.Battery1";
+    char const *const property = "Percentage";
+
+    dbus_message_append_args(msg,
+                             DBUS_TYPE_STRING, &battery_interface,
+                             DBUS_TYPE_INVALID);
+
+    dbus_message_append_args(msg,
+                             DBUS_TYPE_STRING, &property,
+                             DBUS_TYPE_INVALID);
+
+    rsp = dbus_connection_send_with_reply_and_block(connection,
+                                                    msg,
+                                                    DBUS_TIMEOUT_USE_DEFAULT,
+                                                    &error);
+    if (dbus_error_is_set(&error))
+    {
+        dbus_error_free(&error);
+        goto cleanup;
+    }
+
+    if (NULL == rsp)
+        goto cleanup;
+
+    if (!dbus_message_iter_init(rsp, &args))
+        goto cleanup;
+
+    if (DBUS_TYPE_VARIANT != dbus_message_iter_get_arg_type(&args))
+        goto cleanup;
+
+    dbus_message_iter_recurse(&args, &subargs);
+
+    if (DBUS_TYPE_BYTE == dbus_message_iter_get_arg_type(&subargs))
+    {
+        unsigned char val;
+        dbus_message_iter_get_basic(&subargs, &val);
+        ret = (int)val;
+    }
+
+cleanup:
+    if (NULL != rsp)
+        dbus_message_unref(rsp);
+    if (NULL != msg)
+        dbus_message_unref(msg);
+
+    return ret;
+}
+
 uint8_t sdp_getServiceChannel(const char *dev_addr, uint8_t *uuid128)
 {
   int status;
