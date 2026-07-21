@@ -1,6 +1,7 @@
 #include "LinuxBluetoothConnector.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -33,14 +34,14 @@ LinuxBluetoothConnector::~LinuxBluetoothConnector()
 
 int LinuxBluetoothConnector::recv(char *buf, size_t length)
 {
-  size_t read = ::read(this->_socket, buf, length);
-  return read;
+  ssize_t read = ::read(this->_socket, buf, length);
+  return static_cast<int>(read);
 }
 
 int LinuxBluetoothConnector::send(char *buf, size_t length)
 {
-  size_t written = ::write(this->_socket, buf, length);
-  return written;
+  ssize_t written = ::write(this->_socket, buf, length);
+  return static_cast<int>(written);
 }
 
 void LinuxBluetoothConnector::connect(const std::string &addrStr)
@@ -101,15 +102,16 @@ std::vector<BluetoothDevice> LinuxBluetoothConnector::getConnectedDevices()
     res.push_back({.name = name, .mac = address});
   }
 
+  dbus_connection_unref(connection);
   return res;
 }
 
 void LinuxBluetoothConnector::disconnect() noexcept
 {
-  // close connection
   if (this->_socket != -1)
   {
     ::close(this->_socket);
+    this->_socket = -1;
   }
   this->_connected = false;
 }

@@ -38,7 +38,7 @@ void Listener::handle_message(Buffer msg)
     {
         this->_bt.setSeqNumber(m.seqNumber);
         this->_bt.postAck();
-        this->_bt._ack.notify_all();
+        this->_bt.notifyAck();
     } 
     else if (m.dataType == DATA_TYPE::DATA_MDR || m.dataType == DATA_TYPE::DATA_MDR_NO2) 
     {

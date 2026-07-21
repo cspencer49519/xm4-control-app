@@ -1,4 +1,5 @@
 #include "ByteMagic.h"
+#include <array>
 #include <climits>
 #include <cstdint>
 
@@ -10,10 +11,10 @@ unsigned int byteOrderSwap(unsigned int num)
 		(num << 24);
 }
 
-std::vector<unsigned char> intToBytesBE(unsigned int num)
+std::array<unsigned char, 4> intToBytesBE(unsigned int num)
 {
-	std::vector<unsigned char> ret(sizeof(num));
-	for (size_t i = 0; i < sizeof(num); i++)
+	std::array<unsigned char, 4> ret{};
+	for (size_t i = 0; i < 4; i++)
 	{
 		ret[i] = (num >> (CHAR_BIT * (3 - i))) & 0xff;
 	}

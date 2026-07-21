@@ -5,6 +5,7 @@
 #include "Constants.h"
 
 #include <mutex>
+#include <atomic>
 #include <vector>
 #include <tuple>
 
@@ -48,7 +49,7 @@ public:
 	int getVptType();
 
 	bool getMultiPointSetting();
-	const std::vector<BluetoothDevice>& getDevices();
+	std::vector<BluetoothDevice> getDevices();
 	std::pair<int, int> getConnectedDevices();
 	void setMultiPointConnection(int connectionId, int newDevice);
 	inline void disconnect(int deviceIdx);
@@ -67,7 +68,7 @@ public:
 	
 	unsigned int getCapabilities();
 private:
-	unsigned int _capabilities = 0;
+	std::atomic<unsigned int> _capabilities = 0;
 
 	Property<bool> _ambientSoundControl = { 0 };
 	Property<bool> _focusOnVoice = { 0 };

@@ -232,11 +232,7 @@ void CrossPlatformGUI::_drawBattery()
 
 void CrossPlatformGUI::_drawDeviceDiscovery()
 {
-    static std::vector<BluetoothDevice>
-        connectedDevices;
-
-    static int selectedDevice=-1;
-    static auto connectStart = std::chrono::steady_clock::now();
+    auto& connectedDevices = this->_discoveredDevices;
 
     //---------------------------------
     // Already connected
@@ -257,19 +253,8 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
             )
         )
         {
-            selectedDevice=-1;
-            this->_listenerActive = false;
-
-            this->_bt.disconnect();
-
-            if(this->_listenerFuture.valid())
-            {
-                this->_listenerFuture.wait_for(
-                    std::chrono::milliseconds(LISTENER_TIMEOUT_MS)
-                );
-            }
-
-            this->_listener.reset();
+            this->_selectedDevice = -1;
+            this->cleanup();
         }
 
         return;
@@ -294,7 +279,7 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
     {
         ImGui::RadioButton(
             device.name.c_str(),
-            &selectedDevice,
+            &this->_selectedDevice,
             temp++
         );
     }
@@ -311,7 +296,7 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
     )
     {
         bool timedOut = false;
-        auto elapsed = std::chrono::steady_clock::now() - connectStart;
+        auto elapsed = std::chrono::steady_clock::now() - this->_connectStart;
         if (elapsed > std::chrono::milliseconds(FUTURE_TIMEOUT_MS))
         {
             timedOut = true;
@@ -370,15 +355,15 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
         )
         {
             if(
-                selectedDevice!=-1
+                this->_selectedDevice != -1
             )
             {
                 this->_connectedDevice=
                     connectedDevices[
-                        selectedDevice
+                        this->_selectedDevice
                     ];
 
-                connectStart = std::chrono::steady_clock::now();
+                this->_connectStart = std::chrono::steady_clock::now();
 
                 this->_connectFuture
                 .setFromAsync(
@@ -417,18 +402,9 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
                         .get()
                     );
 
-                    if(
-                        this
-                        ->_connectedDevice
-                        .name
-                        ==
-                        "WH-1000XM4"
-                    )
-                    {
-                        this
-                        ->_headphones
-                        .queryState();
-                    }
+                    this
+                    ->_headphones
+                    .queryState();
                 });
             }
         }
@@ -453,7 +429,7 @@ void CrossPlatformGUI::_drawDeviceDiscovery()
         .valid()
     )
     {
-        selectedDevice=-1;
+        this->_selectedDevice = -1;
 
         this
         ->_connectedDevicesFuture
@@ -594,9 +570,6 @@ void CrossPlatformGUI::resetUIState()
 
 void CrossPlatformGUI::_drawSurroundControls()
 {
-    static int soundPosition=0;
-    static int vptType=0;
-
     ImGui::TextDisabled(
         "Only one mode can be active"
     );
@@ -606,33 +579,33 @@ void CrossPlatformGUI::_drawSurroundControls()
     if(
     ImGui::Combo(
         "Position",
-        &soundPosition,
+        &this->_soundPosition,
         "Off\0Front Left\0Front Right\0Front\0Rear Left\0Rear Right\0\0"
     ))
     {
-        vptType=0;
+        this->_vptType = 0;
     }
 
     if(
     ImGui::Combo(
         "Environment",
-        &vptType,
+        &this->_vptType,
         "Off\0Outdoor Festival\0Arena\0Concert Hall\0Club\0\0"
     ))
     {
-        soundPosition=0;
+        this->_soundPosition = 0;
     }
 
     this->_headphones
     .setSurroundPosition(
         SOUND_POSITION_PRESET_ARRAY[
-            soundPosition
+            this->_soundPosition
         ]
     );
 
     this->_headphones
     .setVptType(
-        vptType
+        this->_vptType
     );
 }
 
@@ -663,31 +636,26 @@ void CrossPlatformGUI::_drawSpeakToChat()
 		enum AutoOff { Time_Short, Time_Std, Time_Long, Time_Inf, Time_count};
 		const char* Time_hints[Time_count] = { "Short", "Standard", "Long", "Off" };
 
-		static bool S2Ctoggle_check = false;
-		static int S2C_Sens = Sens_Auto;
-		static bool S2C_Voice = 0;
-		static int S2C_AutoOff = Time_Short;
+		const char* Sens_name = (this->_s2cSensitivity >= 0 && this->_s2cSensitivity < Sens_count) ? Sens_hints[this->_s2cSensitivity] : "Unknown";
+		const char* Time_name = (this->_s2cAutoOff >= 0 && this->_s2cAutoOff < Time_count) ? Time_hints[this->_s2cAutoOff] : "Unknown";
 
-		const char* Sens_name = (S2C_Sens >= 0 && S2C_Sens < Sens_count) ? Sens_hints[S2C_Sens] : "Unknown";
-		const char* Time_name = (S2C_AutoOff >= 0 && S2C_AutoOff < Time_count) ? Time_hints[S2C_AutoOff] : "Unknown";
+		ImGui::Checkbox("Speak To Chat", &this->_s2cToggle);
 
-		ImGui::Checkbox("Speak To Chat", &S2Ctoggle_check);
-
-		if (S2Ctoggle_check)
+		if (this->_s2cToggle)
 		{
 			ImGui::Indent();
-			ImGui::SliderInt("Sensitivity", &S2C_Sens, 0, Sens_count - 1, Sens_name);
-			ImGui::SliderInt("Auto close", &S2C_AutoOff, 0, Time_count - 1, Time_name);
-			ImGui::Checkbox("Voice passthrough", &S2C_Voice);
+			ImGui::SliderInt("Sensitivity", &this->_s2cSensitivity, 0, Sens_count - 1, Sens_name);
+			ImGui::SliderInt("Auto close", &this->_s2cAutoOff, 0, Time_count - 1, Time_name);
+			ImGui::Checkbox("Voice passthrough", &this->_s2cVoice);
 			ImGui::Unindent();
 		}
 
-		if (S2Ctoggle_check)
+		if (this->_s2cToggle)
 			this->_headphones.setS2CToggle(S2C_TOGGLE::ACTIVE);
 		else
 			this->_headphones.setS2CToggle(S2C_TOGGLE::INACTIVE);
 
-		this->_headphones.setS2COptions(S2C_Sens, S2C_Voice, S2C_AutoOff);
+		this->_headphones.setS2COptions(this->_s2cSensitivity, this->_s2cVoice, this->_s2cAutoOff);
 	}
 }
 
@@ -761,12 +729,9 @@ void CrossPlatformGUI::_drawMultiPointConn()
 
 void CrossPlatformGUI::_setHeadphoneSettings()
 {
-    static int commandLinger=0;
-    static auto sendStart = std::chrono::steady_clock::now();
-
     if(this->_sendCommandFuture.ready())
     {
-        commandLinger=0;
+        this->_commandLinger = 0;
 
         try
         {
@@ -796,14 +761,14 @@ void CrossPlatformGUI::_setHeadphoneSettings()
         .valid()
     )
     {
-        auto elapsed = std::chrono::steady_clock::now() - sendStart;
+        auto elapsed = std::chrono::steady_clock::now() - this->_sendStart;
         if (elapsed > std::chrono::milliseconds(FUTURE_TIMEOUT_MS))
         {
             this->_mq.addMessage("Command timed out");
             this->_sendCommandFuture = SingleInstanceFuture<void>();
         }
         else if (
-            commandLinger++
+            this->_commandLinger++
             > (FPS / 10)
         )
         {
@@ -816,7 +781,7 @@ void CrossPlatformGUI::_setHeadphoneSettings()
         .isChanged()
     )
     {
-        sendStart = std::chrono::steady_clock::now();
+        this->_sendStart = std::chrono::steady_clock::now();
         this->_sendCommandFuture
         .setFromAsync(
         [=,this]()
@@ -862,26 +827,25 @@ _headphones(_bt)
 
     io.FontGlobalScale = 1.0f;
 
-    char* fileData=
-    new char[
-    sizeof(
-    CascadiaCodeTTF
-    )];
+    void* fileData =
+        ImGui::MemAlloc(
+            sizeof(
+                CascadiaCodeTTF
+            )
+        );
 
     memcpy(
         fileData,
         CascadiaCodeTTF,
         sizeof(
-        CascadiaCodeTTF
+            CascadiaCodeTTF
         )
     );
 
     ImFont* font=
     io.Fonts
     ->AddFontFromMemoryTTF(
-        reinterpret_cast<void*>(
-            fileData
-        ),
+        fileData,
         sizeof(
             CascadiaCodeTTF
         ),

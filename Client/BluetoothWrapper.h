@@ -36,6 +36,7 @@ public:
 	int getBatteryLevel() const { return _connector->getBatteryLevel(); }
 	void setSeqNumber(unsigned char seqNumber);
 	void postAck();
+	void notifyAck();
 
 private:
 	void _waitForAck();
@@ -43,6 +44,7 @@ private:
 	std::unique_ptr<IBluetoothConnector> _connector;
 	std::mutex _connectorMtx;
 	std::mutex _dataMtx;
+	std::condition_variable _ack;
 	
 	/*
 		seqNumber logic:
@@ -52,7 +54,4 @@ private:
 	*/
 	unsigned char _seqNumber = 0;
 	unsigned int _ackBuffer = 0;
-
-public:
-	std::condition_variable _ack;
 };

@@ -77,4 +77,23 @@ private:
 	bool _ambientSoundControl = true;
 	bool _focusOnVoice = false;
 	int _asmLevel = 0;
+
+	// Device discovery state
+	std::vector<BluetoothDevice> _discoveredDevices;
+	int _selectedDevice = -1;
+	std::chrono::steady_clock::time_point _connectStart;
+
+	// Surround controls state
+	int _soundPosition = 0;
+	int _vptType = 0;
+
+	// Speak-to-Chat state
+	bool _s2cToggle = false;
+	int _s2cSensitivity = 0;
+	bool _s2cVoice = false;
+	int _s2cAutoOff = 0;
+
+	// Settings command state
+	int _commandLinger = 0;
+	std::chrono::steady_clock::time_point _sendStart;
 };

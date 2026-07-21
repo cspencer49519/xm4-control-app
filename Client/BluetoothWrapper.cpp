@@ -40,6 +40,7 @@ int BluetoothWrapper::sendCommand(const std::vector<char>& bytes, DATA_TYPE dtyp
 
 void BluetoothWrapper::sendAck(unsigned int seqNumber)
 {
+	std::lock_guard guard(this->_connectorMtx);
 	auto data = CommandSerializer::packageDataForBt({}, DATA_TYPE::ACK, seqNumber ^ 0x01);
 	this->_connector->send(data.data(), data.size());
 }
@@ -70,10 +71,7 @@ std::vector<BluetoothDevice> BluetoothWrapper::getConnectedDevices()
 void BluetoothWrapper::_waitForAck()
 {
 	std::unique_lock<std::mutex> guard(this->_dataMtx);
-
-	if (!(this->_ackBuffer > 0))
-		this->_ack.wait_for(guard, std::chrono::seconds(5));
-
+	this->_ack.wait_for(guard, std::chrono::seconds(5), [this] { return this->_ackBuffer > 0; });
 	if (this->_ackBuffer > 0)
 		this->_ackBuffer--;
 }
@@ -82,6 +80,11 @@ void BluetoothWrapper::postAck()
 {
 	std::lock_guard guard(this->_dataMtx);
 	this->_ackBuffer++;
+}
+
+void BluetoothWrapper::notifyAck()
+{
+	this->_ack.notify_all();
 }
 
 Buffer BluetoothWrapper::readReplies()
@@ -96,6 +99,8 @@ Buffer BluetoothWrapper::readReplies()
 		int i = 0;
 		while(!messageFinished)
 		{
+			if (i >= MAX_BLUETOOTH_MESSAGE_SIZE)
+				throw RecoverableException("Message exceeded maximum size", true);
 			int n = this->_connector->recv(buf+i, 1);
 			if (n <= 0)
 				throw RecoverableException("Connection closed", true);
@@ -139,6 +144,6 @@ Buffer BluetoothWrapper::readReplies()
 
 void BluetoothWrapper::setSeqNumber(unsigned char seqNumber)
 {
-	std::lock_guard guard(this->_dataMtx);
+	std::lock_guard guard(this->_connectorMtx);
 	this->_seqNumber = seqNumber;
 }

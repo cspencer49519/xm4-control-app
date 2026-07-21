@@ -15,7 +15,7 @@ target_sources(SonyHeadphonesClient
     CommandSerializer.cpp
     TimedMessageQueue.cpp
     Listener.cpp
-    CrossPlatformGUI.cpp "Headphones.cpp")
+    Headphones.cpp)
 
 target_include_directories (SonyHeadphonesClient
     PRIVATE ${CMAKE_SOURCE_DIR}

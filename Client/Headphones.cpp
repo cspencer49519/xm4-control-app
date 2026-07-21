@@ -115,8 +115,9 @@ bool Headphones::getMultiPointSetting()
 	return this->_multiPointSetting;
 }
 
-const std::vector<BluetoothDevice>& Headphones::getDevices()
+std::vector<BluetoothDevice> Headphones::getDevices()
 {
+	std::lock_guard guard(this->_propertyMtx);
 	return this->_savedDevices;
 }
 
@@ -172,12 +173,15 @@ bool Headphones::isChanged()
 }
 
 // At most one instance of this function is invoked at any time
-// Synchronization not required
 void Headphones::setChanges()
 {
 	if (!(this->_optimizerState.isFulfilled()))
 	{
-		auto state = this->_optimizerState.desired;
+		OPTIMIZER_STATE state;
+		{
+			std::lock_guard guard(this->_propertyMtx);
+			state = this->_optimizerState.desired;
+		}
 
 		this->_conn.sendCommand(CommandSerializer::serializeXM4OptimizeCommand(
 			state
@@ -189,7 +193,11 @@ void Headphones::setChanges()
 
 	if (!(this->_speakToChat.isFulfilled()))
 	{
-		auto s2cState = this->_speakToChat.desired;
+		S2C_TOGGLE s2cState;
+		{
+			std::lock_guard guard(this->_propertyMtx);
+			s2cState = this->_speakToChat.desired;
+		}
 
 		this->_conn.sendCommand(CommandSerializer::serializeXM4SpeakToChat(
 			s2cState
@@ -201,7 +209,11 @@ void Headphones::setChanges()
 
 	if (!(this->_s2cOptions.isFulfilled()))
 	{
-		auto s2cOptions = this->_s2cOptions.desired;
+		unsigned int s2cOptions;
+		{
+			std::lock_guard guard(this->_propertyMtx);
+			s2cOptions = this->_s2cOptions.desired;
+		}
 		unsigned char sensitivity = (unsigned char) (s2cOptions >> 16) & 0xff;
 		unsigned char voice = (unsigned char) (s2cOptions >> 8) & 0xff;
 		unsigned char offTime = (unsigned char) (s2cOptions) & 0xff;
@@ -218,16 +230,22 @@ void Headphones::setChanges()
 
 	if (!(this->_ambientSoundControl.isFulfilled() && this->_focusOnVoice.isFulfilled() && this->_asmLevel.isFulfilled()))
 	{
-		auto ncAsmEffect = this->_ambientSoundControl.desired ? NC_ASM_EFFECT::ADJUSTMENT_COMPLETION : NC_ASM_EFFECT::OFF;
-		auto asmId = this->_focusOnVoice.desired ? ASM_ID::VOICE : ASM_ID::NORMAL;
-		auto asmLevel = this->_ambientSoundControl.desired ? this->_asmLevel.desired : ASM_LEVEL_DISABLED;
+		NC_ASM_EFFECT ncAsmEffect;
+		ASM_ID asmId;
+		int asmLevel;
+		{
+			std::lock_guard guard(this->_propertyMtx);
+			ncAsmEffect = this->_ambientSoundControl.desired ? NC_ASM_EFFECT::ADJUSTMENT_COMPLETION : NC_ASM_EFFECT::OFF;
+			asmId = this->_focusOnVoice.desired ? ASM_ID::VOICE : ASM_ID::NORMAL;
+			asmLevel = this->_ambientSoundControl.desired ? this->_asmLevel.desired : ASM_LEVEL_DISABLED;
+		}
 		auto packet =
     		CommandSerializer::serializeNcAndAsmSetting(
-        ncAsmEffect,
-        NC_ASM_SETTING_TYPE::LEVEL_ADJUSTMENT,
-        ASM_SETTING_TYPE::LEVEL_ADJUSTMENT,
-        asmId,
-        asmLevel
+	        ncAsmEffect,
+	        NC_ASM_SETTING_TYPE::LEVEL_ADJUSTMENT,
+	        ASM_SETTING_TYPE::LEVEL_ADJUSTMENT,
+	        asmId,
+	        asmLevel
 		);
 
 		this->_conn.sendCommand(packet);
@@ -240,27 +258,28 @@ void Headphones::setChanges()
 	if (!(this->_vptType.isFulfilled() && this->_surroundPosition.isFulfilled())) {
 		VPT_INQUIRED_TYPE command;
 		unsigned char preset;
-
-		if (this->_vptType.desired != 0) {
-			command = VPT_INQUIRED_TYPE::VPT;
-			preset = static_cast<unsigned char>(this->_vptType.desired);
-		}
-		else if (this->_surroundPosition.desired != SOUND_POSITION_PRESET::OFF) {
-			command = VPT_INQUIRED_TYPE::SOUND_POSITION;
-			preset = static_cast<unsigned char>(this->_surroundPosition.desired);
-		}
-		else {
-			// Just used that one because it seems like it disables both
-			if (this->_surroundPosition.current != SOUND_POSITION_PRESET::OFF) {
-				command = VPT_INQUIRED_TYPE::SOUND_POSITION;
-				preset = static_cast<unsigned char>(SOUND_POSITION_PRESET::OFF);
-			}
-			else if (this->_vptType.current != 0) {
+		{
+			std::lock_guard guard(this->_propertyMtx);
+			if (this->_vptType.desired != 0) {
 				command = VPT_INQUIRED_TYPE::VPT;
-				preset = 0;
+				preset = static_cast<unsigned char>(this->_vptType.desired);
+			}
+			else if (this->_surroundPosition.desired != SOUND_POSITION_PRESET::OFF) {
+				command = VPT_INQUIRED_TYPE::SOUND_POSITION;
+				preset = static_cast<unsigned char>(this->_surroundPosition.desired);
 			}
 			else {
-				throw std::logic_error("it's impossible that both values were changed to zero and were also previously zero");
+				if (this->_surroundPosition.current != SOUND_POSITION_PRESET::OFF) {
+					command = VPT_INQUIRED_TYPE::SOUND_POSITION;
+					preset = static_cast<unsigned char>(SOUND_POSITION_PRESET::OFF);
+				}
+				else if (this->_vptType.current != 0) {
+					command = VPT_INQUIRED_TYPE::VPT;
+					preset = 0;
+				}
+				else {
+					throw std::logic_error("it's impossible that both values were changed to zero and were also previously zero");
+				}
 			}
 		}
 		auto packet =
@@ -278,10 +297,16 @@ void Headphones::setChanges()
 	
 	if (!(this->_dev1.isFulfilled()))
 	{
-		if (this->_dev1.current!=0)
-			this->disconnect(this->_dev1.current);
-		if (this->_dev1.desired!=0)
-			this->connect(this->_dev1.desired);
+		int dev1Current, dev1Desired;
+		{
+			std::lock_guard guard(this->_propertyMtx);
+			dev1Current = this->_dev1.current;
+			dev1Desired = this->_dev1.desired;
+		}
+		if (dev1Current != 0)
+			this->disconnect(dev1Current);
+		if (dev1Desired != 0)
+			this->connect(dev1Desired);
 
 		std::lock_guard guard(this->_propertyMtx);
 		this->_dev1.desired = this->_dev1.current;
@@ -289,10 +314,16 @@ void Headphones::setChanges()
 
 	if (!(this->_dev2.isFulfilled()))
 	{
-		if (this->_dev2.current!=0)
-			this->disconnect(this->_dev2.current);
-		if (this->_dev2.desired!=0)
-			this->connect(this->_dev2.desired);
+		int dev2Current, dev2Desired;
+		{
+			std::lock_guard guard(this->_propertyMtx);
+			dev2Current = this->_dev2.current;
+			dev2Desired = this->_dev2.desired;
+		}
+		if (dev2Current != 0)
+			this->disconnect(dev2Current);
+		if (dev2Desired != 0)
+			this->connect(dev2Desired);
 
 		std::lock_guard guard(this->_propertyMtx);
 		this->_dev2.desired = this->_dev2.current;
@@ -438,10 +469,16 @@ void Headphones::queryDevices()
 
 void Headphones::queryS2C()
 {
-
+	this->_conn.sendCommand({
+		static_cast<char>(COMMAND_TYPE::S2C_QUERY),
+		0x01
+	});
 }
 
 void Headphones::queryS2COptions()
 {
-
+	this->_conn.sendCommand({
+		static_cast<char>(COMMAND_TYPE::S2C_OPTIONS_QUERY),
+		0x01
+	});
 }
