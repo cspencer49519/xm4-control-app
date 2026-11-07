@@ -1,228 +1,1218 @@
 //
-//  ViewController.m
+//  ViewController.mm
 //  SonyHeadphonesClient
 //
 //  Created by Sem Visscher on 01/12/2020.
 //
+//  The window UI is built in code. Threading model:
+//   * main thread  - all AppKit work, reads Headphones::getSettings() snapshots
+//   * _ioQueue     - serial queue for every blocking Bluetooth call
+//                    (connect, initial state sync, sending changes, disconnect)
+//   * listener     - std::thread running Listener::listen(); feeds replies and
+//                    notifications into Headphones, which calls back here
+//
 
 #import "ViewController.h"
+#include "Listener.h"
 
-@implementation ViewController
-@synthesize connectedLabel, connectButton, ANCSlider, ANCValueLabel, focusOnVoice, ANCEnabled, ANCValuePrefixLabel, virtualSoundLabel, soundPositionLabel, surroundLabel, soundPosition, surround;
+#include <algorithm>
+#include <memory>
+#include <thread>
+
+typedef NS_ENUM(NSInteger, ConnectionState) {
+    ConnectionStateDisconnected,
+    ConnectionStateConnecting,
+    ConnectionStateSyncing,
+    ConnectionStateReady,
+};
+
+typedef NS_ENUM(NSInteger, NoiseMode) {
+    NoiseModeCancelling = 0,
+    NoiseModeAmbient = 1,
+    NoiseModeOff = 2,
+};
+
+// Levels as encoded by Headphones: 0 = NC (dual), 1 = NC (single / wind), L+1 = ambient level L
+// (1..N, where N = Headphones::getAmbientSteps(), reported by the device).
+static const int kAmbientMinLevel = 2;
+static const auto kSyncTimeout = std::chrono::milliseconds(8000);
+static NSString* const kLastDeviceKey = @"LastDeviceAddress";
+static NSString* const kLastDeviceNameKey = @"LastDeviceName";
+
+// Process-wide Bluetooth objects. Headphones keeps a reference to the wrapper,
+// so both live for the whole app lifetime.
+static BluetoothWrapper* g_bt = nullptr;
+static Headphones* g_headphones = nullptr;
+static std::atomic<bool> g_listenerRunning{ false };
+static std::unique_ptr<Listener> g_listener;
+static std::thread g_listenerThread;
+
+// Stop the listener thread and close the connection. Safe to call repeatedly.
+static void StopConnection()
+{
+    g_listenerRunning = false;
+    g_bt->disconnect(); // also wakes the listener blocked in recv()
+    if (g_listenerThread.joinable())
+        g_listenerThread.join();
+    g_listener.reset();
+}
+
+static NSString* CodecName(AUDIO_CODEC codec) {
+    switch (codec) {
+        case AUDIO_CODEC::SBC: return @"SBC";
+        case AUDIO_CODEC::AAC: return @"AAC";
+        case AUDIO_CODEC::LDAC: return @"LDAC";
+        case AUDIO_CODEC::APTX: return @"aptX";
+        case AUDIO_CODEC::APTX_HD: return @"aptX HD";
+        default: return @"Other codec";
+    }
+}
+
+// The official app's labels for known preset IDs; other IDs use the name the device sends.
+static NSString* EqPresetName(const EqPreset& preset) {
+    switch (preset.id) {
+        case 0x00: return @"Off";
+        case 0x01: return @"Rock";
+        case 0x02: return @"Pop";
+        case 0x03: return @"Jazz";
+        case 0x04: return @"Dance";
+        case 0x05: return @"EDM";
+        case 0x06: return @"R&B / Hip Hop";
+        case 0x07: return @"Acoustic";
+        case 0x10: return @"Bright";
+        case 0x11: return @"Excited";
+        case 0x12: return @"Mellow";
+        case 0x13: return @"Relaxed";
+        case 0x14: return @"Vocal";
+        case 0x15: return @"Treble Boost";
+        case 0x16: return @"Bass Boost";
+        case 0x17: return @"Speech";
+        case EQ_PRESET_MANUAL: return @"Manual";
+        case 0xa1: case 0xa2: case 0xa3: case 0xa4: case 0xa5:
+            return [NSString stringWithFormat:@"Custom %d", preset.id - 0xa0];
+    }
+    return preset.name.empty() ? [NSString stringWithFormat:@"Preset %02X", preset.id] : @(preset.name.c_str());
+}
+
+static NSString* EqValueText(int value) {
+    return value == 0 ? @"0" : [NSString stringWithFormat:@"%+d", value];
+}
+
+static NSString* UpscalingName(UPSCALING_TYPE type) {
+    switch (type) {
+        case UPSCALING_TYPE::DSEE_HX: return @"DSEE HX";
+        case UPSCALING_TYPE::DSEE: return @"DSEE";
+        case UPSCALING_TYPE::DSEE_EXTREME: return @"DSEE Extreme";
+    }
+    return @"DSEE";
+}
+
+@interface FlippedView : NSView
+@end
+@implementation FlippedView
+- (BOOL)isFlipped { return YES; }
+@end
+
+@implementation ViewController {
+    dispatch_queue_t _ioQueue;
+    ConnectionState _state;
+    // Incremented on every connect/disconnect so stale async completions can be ignored.
+    NSUInteger _generation;
+    BOOL _applying;
+    BOOL _didAutoConnect;
+    NSString* _deviceName;
+    int _lastAmbientLevel;
+    NSString* _devicesSignature;
+    NSTimer* _connectionTimer;
+    NSStatusItem* _statusItem;
+    id _terminateObserver;
+
+    // Header
+    NSTextField* _deviceNameLabel;
+    NSTextField* _statusLabel;
+    NSTextField* _detailLabel;
+    NSTextField* _batteryLabel;
+    NSImageView* _batteryIcon;
+    NSProgressIndicator* _spinner;
+    NSButton* _connectButton;
+    NSButton* _reloadButton;
+    NSTextField* _messageLabel;
+
+    // Cards
+    NSView* _emptyCard;
+    NSView* _noiseCard;
+    NSView* _soundCard;
+    NSView* _s2cCard;
+    NSView* _optimizerCard;
+    NSView* _devicesCard;
+    NSView* _eqCard;
+
+    // Equalizer (rebuilt when the device's EQ description changes)
+    NSPopUpButton* _eqPresetPopup;
+    NSButton* _eqFlatButton;
+    NSStackView* _eqBody;
+    NSStackView* _eqClearBassRow;
+    NSStackView* _eqBandsRow;
+    NSTextField* _eqHint;
+    NSMutableArray<NSSlider*>* _eqSliders;      // index = band index
+    NSMutableArray<NSTextField*>* _eqValueLabels;
+    NSString* _eqSignature;
+
+    // Noise control
+    NSSegmentedControl* _noiseMode;
+    NSView* _ncOptions;
+    NSButton* _windNoise;
+    NSView* _ambientOptions;
+    NSSlider* _ambientSlider;
+    NSTextField* _ambientValue;
+    NSButton* _focusOnVoice;
+
+    // Sound
+    NSPopUpButton* _vptPopup;
+    NSPopUpButton* _positionPopup;
+
+    // Speak-to-Chat
+    NSSwitch* _s2cSwitch;
+    NSPopUpButton* _s2cSensitivity;
+    NSPopUpButton* _s2cAutoClose;
+    NSButton* _s2cVoice;
+
+    // Optimizer
+    NSButton* _optimizeButton;
+    NSTextField* _optimizeStatus;
+
+    // Multipoint
+    NSStackView* _devicesList;
+    NSTextField* _devicesHint;
+}
+
+#pragma mark - Lifecycle
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    std::unique_ptr<IBluetoothConnector> connector = std::make_unique<MacOSBluetoothConnector>();
-    // Wrap the connector using the bluetoothwrapper
-    bt = BluetoothWrapper(std::move(connector));
-    statusItem = [NSStatusBar.systemStatusBar statusItemWithLength: -1];
-    statusItem.button.image = [NSImage imageNamed:@"NSRefreshTemplate"];
-    [statusItem setTarget:self];
-    [statusItem setAction:@selector(statusItemClick:)];
-}
 
-- (void)displayError:(RecoverableException)exc {
-    NSString *errorText;
-    if (exc.shouldDisconnect){
-        errorText = @"Unexpected error occurred and disconnected.";
-        bt.disconnect();
-        [self displayDisconnectedWithText:errorText];
-    } else {
-        errorText = @"Unexpected error occurred.";
-        [connectedLabel setStringValue: errorText];
+    if (g_bt == nullptr) {
+        g_bt = new BluetoothWrapper(std::make_unique<MacOSBluetoothConnector>());
+        g_headphones = new Headphones(*g_bt);
     }
-    NSAlert *alert = [[NSAlert alloc] init];
-    [alert setMessageText:errorText];
-    [alert setInformativeText:@(exc.what())];
-    [alert addButtonWithTitle:@"Ok"];
-    [alert runModal];
 
-}
+    _ioQueue = dispatch_queue_create("SonyHeadphonesClient.io", DISPATCH_QUEUE_SERIAL);
+    _state = ConnectionStateDisconnected;
+    _lastAmbientLevel = DEFAULT_AMBIENT_STEPS + 1;
 
-- (void)displayDisconnectedWithText: (NSString *)text{
-    [ANCSlider setEnabled:FALSE];
-    [ANCSlider setIntValue:0];
-    [focusOnVoice setEnabled:FALSE];
-    [ANCEnabled setEnabled:FALSE];
-    [ANCEnabled setState:FALSE];
-    [focusOnVoice setEnabled:FALSE];
-    [surround setEnabled:FALSE];
-    [soundPosition setEnabled:FALSE];
-    [virtualSoundLabel setTextColor:NSColor.tertiaryLabelColor];
-    [surroundLabel setTextColor:NSColor.tertiaryLabelColor];
-    [soundPositionLabel setTextColor:NSColor.tertiaryLabelColor];
-    [ANCValuePrefixLabel setTextColor:NSColor.tertiaryLabelColor];
-    [ANCValueLabel setTextColor:NSColor.tertiaryLabelColor];
-    [connectedLabel setStringValue:text];
-    [surround selectItemAtIndex:0];
-    [soundPosition selectItemAtIndex:0];
-    [connectButton setTitle:@"Connect to Bluetooth device"];
-    statusItem.button.image = [NSImage imageNamed:@"NSRefreshTemplate"];
-}
-
-- (void)statusItemClick:(id)sender {   
-    headphones->setAmbientSoundControl(TRUE);
-    if ([focusOnVoice isEnabled]) {
-        [ANCSlider setIntValue:0];
-        headphones->setAsmLevel(0);
-        [focusOnVoice setEnabled:FALSE];
-    } else {
-        [ANCSlider setIntValue:19];
-        headphones->setAsmLevel(19);
-        [focusOnVoice setEnabled:TRUE];
-    }
-    
-    [self updateHeadphones];
-}
-
-- (void)setRepresentedObject:(id)representedObject {
-    [super setRepresentedObject:representedObject];
-}
-
-- (IBAction)connectToDevice:(id)sender {
-    statusItem.button.image = [NSImage imageNamed:@"NSRefreshTemplate"];
-    
-    // check if it should disconnect
-    if (bt.isConnected()) {
-        bt.disconnect();
-        [self displayDisconnectedWithText:@"Not connected"];
-        return;
-    }
-    
-    // launch device selector modal
-    IOBluetoothDeviceSelectorController *dSelector = [IOBluetoothDeviceSelectorController deviceSelector];
-    int result = [dSelector runModal];
-    
-    
-    if (result == kIOBluetoothUISuccess) {
-        // get device
-        IOBluetoothDevice *device = [[dSelector getResults] lastObject];
-        try {
-            // connect to device
-            bt.connect([[device addressString] UTF8String]);
-        } catch (RecoverableException& exc) {
-            [self displayError:exc];
-            return;
-        }
-        // give it some time to connect
-        int timeout = 5;
-        while(!bt.isConnected() and timeout >= 0) {
-            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
-            timeout--;
-        }
-        if (bt.isConnected()) {
-            IOBluetoothDevice *device = [[dSelector getResults] lastObject];
-            [connectedLabel setStringValue:[@"Connected: " stringByAppendingString:[device nameOrAddress]]];
-            [connectButton setTitle:@"Disconnect"];
-            [ANCSlider setEnabled:TRUE];
-            [ANCEnabled setEnabled:TRUE];
-            [ANCEnabled setState:TRUE];
-            [focusOnVoice setEnabled:FALSE];
-            [surround setEnabled:TRUE];
-            [soundPosition setEnabled:TRUE];
-            [virtualSoundLabel setTextColor:NSColor.labelColor];
-            [surroundLabel setTextColor:NSColor.labelColor];
-            [soundPositionLabel setTextColor:NSColor.labelColor];
-            [ANCValuePrefixLabel setTextColor:NSColor.labelColor];
-            [ANCValueLabel setTextColor:NSColor.labelColor];
-            statusItem.button.image = [NSImage imageNamed:@"NSHomeTemplate"];
-            headphones = new Headphones(bt);
-        } else {
-            [self displayDisconnectedWithText:@"Not connected, connection timed out."];
-            bt.disconnect();
-        }
-    } else {
-        [self displayDisconnectedWithText:@"Not connected, device selector canceled."];
-    }
-}
-
-- (IBAction)ANCSliderChanged:(id)sender {
-    headphones->setAmbientSoundControl(TRUE);
-    headphones->setAsmLevel(ANCSlider.intValue);
-    [self updateHeadphones];
-}
-
-- (IBAction)ANCEnabledButtonChanged:(id)sender {
-    headphones->setAmbientSoundControl(ANCEnabled.state);
-    [self updateHeadphones];
-}
-
-- (IBAction)focusOnVoiceChanged:(id)sender {
-    headphones->setFocusOnVoice(focusOnVoice.state);
-    [self updateHeadphones];
-}
-
-- (IBAction)surroundChanged:(id)sender {
-    headphones->setVptType((int) surround.indexOfSelectedItem);
-    headphones->setSurroundPosition(SOUND_POSITION_PRESET_ARRAY[0]);
-    [self updateHeadphones];
-}
-
-- (IBAction)soundPositionChanged:(id)sender {
-    headphones->setVptType(0);
-    headphones->setSurroundPosition(SOUND_POSITION_PRESET_ARRAY[soundPosition.indexOfSelectedItem]);
-    [self updateHeadphones];
-}
-
-- (void)updateHeadphones {
-    if (!bt.isConnected()) {
-        [self displayDisconnectedWithText:@"Not connected, please reconnect."];
-        return;
-    }
-    if (headphones->isChanged()) {
-        // run in a background thread
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
-            try {
-                headphones->setChanges();
-                [self updateGUI];
-            } catch (RecoverableException& exc) {
-                [self displayError:exc];
-            }
+    __weak ViewController* weakSelf = self;
+    g_headphones->setStateChangedCallback([weakSelf]() {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf deviceStateChanged];
         });
+    });
+
+    [self buildUI];
+    [self setUpStatusItem];
+
+    _connectionTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(checkConnection:) userInfo:nil repeats:YES];
+
+    _terminateObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationWillTerminateNotification object:nil queue:nil usingBlock:^(NSNotification* note) {
+        StopConnection();
+    }];
+
+    [self refreshUI];
+}
+
+- (void)viewDidAppear {
+    [super viewDidAppear];
+    self.view.window.minSize = NSMakeSize(420, 420);
+    if (!_didAutoConnect) {
+        _didAutoConnect = YES;
+        [self autoConnectToLastDevice];
     }
 }
 
-- (void)updateGUI {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self->ANCEnabled setState:headphones->getAmbientSoundControl()];
-        [self->focusOnVoice setState:headphones->getFocusOnVoice()];
-        [self->surround selectItemAtIndex:headphones->getVptType()];
-        SOUND_POSITION_PRESET preset = headphones->getSurroundPosition();
-        // get the index of the preset, from the SOUND_POSITION_PRESET_ARRAY,
-        int index = 0;
-        for (SOUND_POSITION_PRESET p : SOUND_POSITION_PRESET_ARRAY) {
-            if (p == preset) {
-                break;
+- (void)dealloc {
+    [_connectionTimer invalidate];
+    if (_terminateObserver)
+        [[NSNotificationCenter defaultCenter] removeObserver:_terminateObserver];
+}
+
+#pragma mark - UI construction helpers
+
+static NSTextField* MakeLabel(NSString* text, NSFont* font, NSColor* color) {
+    NSTextField* label = [NSTextField labelWithString:text ?: @""];
+    label.font = font;
+    label.textColor = color;
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    return label;
+}
+
+static NSImageView* MakeSymbol(NSString* name, CGFloat pointSize, NSColor* tint) {
+    NSImage* image = [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil];
+    NSImageView* view = [NSImageView imageViewWithImage:image ?: [NSImage new]];
+    view.symbolConfiguration = [NSImageSymbolConfiguration configurationWithPointSize:pointSize weight:NSFontWeightRegular];
+    view.contentTintColor = tint;
+    view.translatesAutoresizingMaskIntoConstraints = NO;
+    [view setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    return view;
+}
+
+static NSStackView* MakeStack(NSUserInterfaceLayoutOrientation orientation, CGFloat spacing, NSArray<NSView*>* views) {
+    NSStackView* stack = [NSStackView stackViewWithViews:views];
+    stack.orientation = orientation;
+    stack.spacing = spacing;
+    stack.alignment = orientation == NSUserInterfaceLayoutOrientationVertical ? NSLayoutAttributeLeading : NSLayoutAttributeCenterY;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    return stack;
+}
+
+static NSView* MakeSpacer(void) {
+    NSView* spacer = [NSView new];
+    spacer.translatesAutoresizingMaskIntoConstraints = NO;
+    [spacer setContentHuggingPriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    return spacer;
+}
+
+static NSPopUpButton* MakePopup(NSArray<NSString*>* items, id target, SEL action) {
+    NSPopUpButton* popup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [popup addItemsWithTitles:items];
+    popup.target = target;
+    popup.action = action;
+    popup.translatesAutoresizingMaskIntoConstraints = NO;
+    [popup.widthAnchor constraintEqualToConstant:180].active = YES;
+    return popup;
+}
+
+// A rounded card with an icon + title header above `body`.
+- (NSView*)cardWithTitle:(NSString*)title symbol:(NSString*)symbol body:(NSView*)body {
+    NSBox* box = [NSBox new];
+    box.boxType = NSBoxCustom;
+    box.titlePosition = NSNoTitle;
+    box.cornerRadius = 10;
+    box.borderWidth = 1;
+    box.borderColor = NSColor.separatorColor;
+    box.fillColor = NSColor.controlBackgroundColor;
+    box.contentViewMargins = NSZeroSize;
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSView* content;
+    if (title) {
+        NSStackView* header = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 8, @[
+            MakeSymbol(symbol, 15, NSColor.controlAccentColor),
+            MakeLabel(title, [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold], NSColor.labelColor),
+        ]);
+        content = MakeStack(NSUserInterfaceLayoutOrientationVertical, 12, @[header, body]);
+        [body.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
+    } else {
+        content = body;
+    }
+
+    [box.contentView addSubview:content];
+    [NSLayoutConstraint activateConstraints:@[
+        [content.leadingAnchor constraintEqualToAnchor:box.contentView.leadingAnchor constant:16],
+        [content.trailingAnchor constraintEqualToAnchor:box.contentView.trailingAnchor constant:-16],
+        [content.topAnchor constraintEqualToAnchor:box.contentView.topAnchor constant:14],
+        [content.bottomAnchor constraintEqualToAnchor:box.contentView.bottomAnchor constant:-14],
+    ]];
+    return box;
+}
+
+// Two-column grid of "Label:  control" rows.
+static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
+    NSGridView* grid = [NSGridView gridViewWithViews:rows];
+    grid.rowSpacing = 10;
+    grid.columnSpacing = 10;
+    grid.translatesAutoresizingMaskIntoConstraints = NO;
+    [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
+    // keep the grid at its natural width so it sits at the leading edge of the card
+    [grid setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    for (NSInteger i = 0; i < grid.numberOfRows; i++)
+        [grid rowAtIndex:i].yPlacement = NSGridCellPlacementCenter;
+    return grid;
+}
+
+#pragma mark - Build UI
+
+- (void)buildUI {
+    NSView* root = self.view;
+
+    NSScrollView* scroll = [NSScrollView new];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.hasVerticalScroller = YES;
+    scroll.autohidesScrollers = YES;
+    scroll.drawsBackground = NO;
+    [root addSubview:scroll];
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
+        [scroll.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+    ]];
+
+    FlippedView* document = [FlippedView new];
+    document.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.documentView = document;
+    NSClipView* clip = scroll.contentView;
+    [NSLayoutConstraint activateConstraints:@[
+        [document.leadingAnchor constraintEqualToAnchor:clip.leadingAnchor],
+        [document.trailingAnchor constraintEqualToAnchor:clip.trailingAnchor],
+        [document.topAnchor constraintEqualToAnchor:clip.topAnchor],
+    ]];
+
+    NSView* header = [self buildHeaderCard];
+    _emptyCard = [self buildEmptyCard];
+    _noiseCard = [self buildNoiseCard];
+    _soundCard = [self buildSoundCard];
+    _s2cCard = [self buildSpeakToChatCard];
+    _optimizerCard = [self buildOptimizerCard];
+    _eqCard = [self buildEqCard];
+    _devicesCard = [self buildDevicesCard];
+    NSTextField* footer = MakeLabel(@"Unofficial client. Settings stay in sync with the headphones.",
+                                    [NSFont systemFontOfSize:11], NSColor.tertiaryLabelColor);
+
+    NSArray<NSView*>* cards = @[header, _emptyCard, _noiseCard, _eqCard, _soundCard, _s2cCard, _optimizerCard, _devicesCard];
+    NSStackView* column = MakeStack(NSUserInterfaceLayoutOrientationVertical, 14, [cards arrayByAddingObject:footer]);
+    column.alignment = NSLayoutAttributeCenterX;
+    column.edgeInsets = NSEdgeInsetsMake(18, 18, 18, 18);
+    [document addSubview:column];
+    [NSLayoutConstraint activateConstraints:@[
+        [column.leadingAnchor constraintEqualToAnchor:document.leadingAnchor],
+        [column.trailingAnchor constraintEqualToAnchor:document.trailingAnchor],
+        [column.topAnchor constraintEqualToAnchor:document.topAnchor],
+        [column.bottomAnchor constraintEqualToAnchor:document.bottomAnchor],
+    ]];
+    for (NSView* card in cards)
+        [card.widthAnchor constraintEqualToAnchor:column.widthAnchor constant:-36].active = YES;
+}
+
+- (NSView*)buildHeaderCard {
+    _deviceNameLabel = MakeLabel(@"No headphones", [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold], NSColor.labelColor);
+    _deviceNameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [_deviceNameLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    _statusLabel = MakeLabel(@"Not connected", [NSFont systemFontOfSize:12], NSColor.secondaryLabelColor);
+
+    _spinner = [NSProgressIndicator new];
+    _spinner.style = NSProgressIndicatorStyleSpinning;
+    _spinner.controlSize = NSControlSizeSmall;
+    _spinner.displayedWhenStopped = NO;
+    _spinner.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _batteryIcon = MakeSymbol(@"battery.100", 14, NSColor.secondaryLabelColor);
+    _batteryLabel = MakeLabel(@"", [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightMedium], NSColor.secondaryLabelColor);
+
+    _detailLabel = MakeLabel(@"", [NSFont systemFontOfSize:11], NSColor.tertiaryLabelColor);
+    _detailLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [_detailLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView* titles = MakeStack(NSUserInterfaceLayoutOrientationVertical, 2, @[_deviceNameLabel, _statusLabel, _detailLabel]);
+    NSStackView* top = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 12, @[
+        MakeSymbol(@"headphones", 28, NSColor.controlAccentColor), titles, MakeSpacer(), _spinner, _batteryIcon, _batteryLabel,
+    ]);
+
+    _connectButton = [NSButton buttonWithTitle:@"Connect…" target:self action:@selector(connectClicked:)];
+    _connectButton.bezelStyle = NSBezelStyleRounded;
+    _connectButton.keyEquivalent = @"\r";
+    _reloadButton = [NSButton buttonWithTitle:@"Reload Settings" target:self action:@selector(reloadClicked:)];
+    _reloadButton.image = [NSImage imageWithSystemSymbolName:@"arrow.clockwise" accessibilityDescription:nil];
+    _reloadButton.imagePosition = NSImageLeading;
+    _reloadButton.toolTip = @"Read every setting from the headphones again";
+    NSStackView* buttons = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 8, @[_connectButton, _reloadButton]);
+
+    _messageLabel = MakeLabel(@"", [NSFont systemFontOfSize:12], NSColor.systemRedColor);
+    _messageLabel.maximumNumberOfLines = 4;
+    _messageLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    _messageLabel.selectable = YES;
+    _messageLabel.hidden = YES;
+    [_messageLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 12, @[top, buttons, _messageLabel]);
+    [top.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
+    [_messageLabel.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
+    return [self cardWithTitle:nil symbol:nil body:body];
+}
+
+- (NSView*)buildEmptyCard {
+    NSTextField* text = MakeLabel(@"Connect your headphones to see and change their settings. "
+                                  @"They need to be paired and connected in macOS Bluetooth settings first.",
+                                  [NSFont systemFontOfSize:12], NSColor.secondaryLabelColor);
+    text.maximumNumberOfLines = 0;
+    text.lineBreakMode = NSLineBreakByWordWrapping;
+    [text setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 0, @[text]);
+    [text.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
+    return [self cardWithTitle:@"Getting started" symbol:@"info.circle" body:body];
+}
+
+- (NSView*)buildNoiseCard {
+    _noiseMode = [NSSegmentedControl segmentedControlWithLabels:@[@"Noise Cancelling", @"Ambient Sound", @"Off"]
+                                                   trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                         target:self
+                                                         action:@selector(noiseModeChanged:)];
+    _noiseMode.segmentDistribution = NSSegmentDistributionFillEqually;
+    _noiseMode.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _windNoise = [NSButton checkboxWithTitle:@"Wind noise reduction (single-microphone mode)" target:self action:@selector(noiseModeChanged:)];
+    _ncOptions = MakeStack(NSUserInterfaceLayoutOrientationVertical, 8, @[_windNoise]);
+
+    _ambientSlider = [NSSlider sliderWithValue:_lastAmbientLevel minValue:kAmbientMinLevel maxValue:_lastAmbientLevel target:self action:@selector(ambientLevelChanged:)];
+    _ambientSlider.continuous = YES;
+    _ambientSlider.numberOfTickMarks = DEFAULT_AMBIENT_STEPS;
+    _ambientSlider.allowsTickMarkValuesOnly = YES;
+    _ambientSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    _ambientValue = MakeLabel(@"", [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular], NSColor.secondaryLabelColor);
+    _ambientValue.alignment = NSTextAlignmentRight;
+    [_ambientValue.widthAnchor constraintEqualToConstant:28].active = YES;
+    NSStackView* sliderRow = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 10, @[
+        MakeLabel(@"Level", [NSFont systemFontOfSize:13], NSColor.labelColor), _ambientSlider, _ambientValue,
+    ]);
+    _focusOnVoice = [NSButton checkboxWithTitle:@"Focus on voice" target:self action:@selector(focusOnVoiceChanged:)];
+    _ambientOptions = MakeStack(NSUserInterfaceLayoutOrientationVertical, 8, @[sliderRow, _focusOnVoice]);
+    [sliderRow.widthAnchor constraintEqualToAnchor:_ambientOptions.widthAnchor].active = YES;
+
+    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 12, @[_noiseMode, _ncOptions, _ambientOptions]);
+    [_noiseMode.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
+    [_ambientOptions.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
+    return [self cardWithTitle:@"Noise Control" symbol:@"waveform" body:body];
+}
+
+- (NSView*)buildSoundCard {
+    _vptPopup = MakePopup(@[@"Off", @"Outdoor Festival", @"Arena", @"Concert Hall", @"Club"], self, @selector(vptChanged:));
+    _positionPopup = MakePopup(@[@"Off", @"Front Left", @"Front Right", @"Front", @"Rear Left", @"Rear Right"], self, @selector(positionChanged:));
+    NSGridView* grid = MakeFormGrid(@[
+        @[MakeLabel(@"Surround:", [NSFont systemFontOfSize:13], NSColor.labelColor), _vptPopup],
+        @[MakeLabel(@"Sound position:", [NSFont systemFontOfSize:13], NSColor.labelColor), _positionPopup],
+    ]);
+    NSTextField* hint = MakeLabel(@"Only one of these effects can be active at a time.", [NSFont systemFontOfSize:11], NSColor.secondaryLabelColor);
+    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 10, @[grid, hint]);
+    return [self cardWithTitle:@"Sound" symbol:@"hifispeaker" body:body];
+}
+
+- (NSView*)buildSpeakToChatCard {
+    _s2cSwitch = [NSSwitch new];
+    _s2cSwitch.target = self;
+    _s2cSwitch.action = @selector(s2cChanged:);
+    _s2cSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField* description = MakeLabel(@"Pause music and let in ambient sound when you start talking.",
+                                         [NSFont systemFontOfSize:12], NSColor.secondaryLabelColor);
+    description.maximumNumberOfLines = 2;
+    description.lineBreakMode = NSLineBreakByWordWrapping;
+    [description setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView* toggleRow = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 12, @[description, MakeSpacer(), _s2cSwitch]);
+
+    _s2cSensitivity = MakePopup(@[@"Auto", @"High", @"Low"], self, @selector(s2cChanged:));
+    _s2cAutoClose = MakePopup(@[@"Short", @"Standard", @"Long", @"Never"], self, @selector(s2cChanged:));
+    _s2cVoice = [NSButton checkboxWithTitle:@"Voice passthrough" target:self action:@selector(s2cChanged:)];
+    NSGridView* grid = MakeFormGrid(@[
+        @[MakeLabel(@"Sensitivity:", [NSFont systemFontOfSize:13], NSColor.labelColor), _s2cSensitivity],
+        @[MakeLabel(@"End after:", [NSFont systemFontOfSize:13], NSColor.labelColor), _s2cAutoClose],
+        @[[NSGridCell emptyContentView], _s2cVoice],
+    ]);
+
+    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 12, @[toggleRow, grid]);
+    [toggleRow.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
+    return [self cardWithTitle:@"Speak-to-Chat" symbol:@"bubble.left.and.bubble.right" body:body];
+}
+
+- (NSView*)buildEqCard {
+    _eqPresetPopup = MakePopup(@[], self, @selector(eqPresetChanged:));
+    _eqFlatButton = [NSButton buttonWithTitle:@"Flat" target:self action:@selector(eqFlatClicked:)];
+    _eqFlatButton.controlSize = NSControlSizeSmall;
+    _eqFlatButton.toolTip = @"Set every band to 0";
+    NSStackView* presetRow = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 10, @[
+        MakeLabel(@"Preset:", [NSFont systemFontOfSize:13], NSColor.labelColor), _eqPresetPopup, MakeSpacer(), _eqFlatButton,
+    ]);
+
+    _eqClearBassRow = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 10, @[]);
+    _eqBandsRow = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 0, @[]);
+    _eqBandsRow.distribution = NSStackViewDistributionFillEqually;
+    _eqHint = MakeLabel(@"", [NSFont systemFontOfSize:11], NSColor.secondaryLabelColor);
+    _eqHint.hidden = YES;
+    _eqSliders = [NSMutableArray array];
+    _eqValueLabels = [NSMutableArray array];
+
+    _eqBody = MakeStack(NSUserInterfaceLayoutOrientationVertical, 14, @[presetRow, _eqClearBassRow, _eqBandsRow, _eqHint]);
+    for (NSView* v in @[presetRow, _eqClearBassRow, _eqBandsRow])
+        [v.widthAnchor constraintEqualToAnchor:_eqBody.widthAnchor].active = YES;
+    return [self cardWithTitle:@"Equalizer" symbol:@"slider.vertical.3" body:_eqBody];
+}
+
+// Rebuild the sliders for the device's band layout.
+- (void)rebuildEqBands:(const EqCapability&)eq {
+    for (NSView* v in [_eqClearBassRow.arrangedSubviews copy]) [v removeFromSuperview];
+    for (NSView* v in [_eqBandsRow.arrangedSubviews copy]) [v removeFromSuperview];
+    [_eqSliders removeAllObjects];
+    [_eqValueLabels removeAllObjects];
+
+    int half = (eq.levelSteps - 1) / 2;
+    for (int i = 0; i < eq.bandCount; i++) {
+        NSString* label = i < (int)eq.bandLabels.size() ? @(eq.bandLabels[i].c_str()) : [NSString stringWithFormat:@"%d", i + 1];
+        NSSlider* slider = [NSSlider sliderWithValue:0 minValue:-half maxValue:half target:self action:@selector(eqBandChanged:)];
+        slider.numberOfTickMarks = 2 * half + 1;
+        slider.allowsTickMarkValuesOnly = YES;
+        slider.continuous = YES;
+        slider.tag = i;
+        slider.translatesAutoresizingMaskIntoConstraints = NO;
+        NSTextField* value = MakeLabel(@"0", [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightMedium], NSColor.secondaryLabelColor);
+        value.alignment = NSTextAlignmentCenter;
+        [_eqSliders addObject:slider];
+        [_eqValueLabels addObject:value];
+
+        if (i == eq.clearBassIndex) {
+            // Clear Bass gets its own horizontal row, like the official app.
+            slider.numberOfTickMarks = 0;
+            [value.widthAnchor constraintEqualToConstant:28].active = YES;
+            for (NSView* v in @[MakeLabel(@"Clear Bass", [NSFont systemFontOfSize:13], NSColor.labelColor), slider, value])
+                [_eqClearBassRow addArrangedSubview:v];
+        } else {
+            slider.vertical = YES;
+            slider.tickMarkPosition = NSTickMarkPositionLeading;
+            [slider.heightAnchor constraintEqualToConstant:130].active = YES;
+            NSTextField* freq = MakeLabel(label, [NSFont systemFontOfSize:11], NSColor.secondaryLabelColor);
+            NSStackView* column = MakeStack(NSUserInterfaceLayoutOrientationVertical, 4, @[value, slider, freq]);
+            column.alignment = NSLayoutAttributeCenterX;
+            [_eqBandsRow addArrangedSubview:column];
+        }
+    }
+    _eqClearBassRow.hidden = eq.clearBassIndex < 0;
+    _eqBandsRow.hidden = !eq.customizable;
+    _eqFlatButton.hidden = !eq.customizable;
+}
+
+- (void)eqPresetChanged:(id)sender {
+    g_headphones->setEqPreset((unsigned char)_eqPresetPopup.selectedItem.tag);
+    [self scheduleApply];
+}
+
+- (void)sendEqBandsFromSliders {
+    EqCapability eq = g_headphones->getEqCapability();
+    int half = (eq.levelSteps - 1) / 2;
+    std::vector<unsigned char> bands;
+    for (NSSlider* slider in _eqSliders)
+        bands.push_back((unsigned char)(slider.intValue + half));
+    g_headphones->setEqBands(bands);
+    [self scheduleApply];
+}
+
+- (void)eqBandChanged:(NSSlider*)sender {
+    if (sender.tag < (NSInteger)_eqValueLabels.count)
+        _eqValueLabels[sender.tag].stringValue = EqValueText(sender.intValue);
+    [self sendEqBandsFromSliders];
+}
+
+- (void)eqFlatClicked:(id)sender {
+    for (NSSlider* slider in _eqSliders)
+        slider.intValue = 0;
+    [self sendEqBandsFromSliders];
+    [self refreshUI];
+}
+
+- (void)refreshEq:(const HeadphonesSettings&)s mouseDown:(BOOL)mouseDown {
+    EqCapability eq = g_headphones->getEqCapability();
+
+    NSMutableString* signature = [NSMutableString stringWithFormat:@"%d/%d/%d/%d", eq.bandCount, eq.levelSteps, eq.clearBassIndex, eq.customizable];
+    for (const auto& label : eq.bandLabels) [signature appendFormat:@"|%s", label.c_str()];
+    for (const auto& p : eq.presets) [signature appendFormat:@"#%d", p.id];
+    if (![signature isEqualToString:_eqSignature]) {
+        _eqSignature = signature;
+        [self rebuildEqBands:eq];
+        [_eqPresetPopup removeAllItems];
+        for (const auto& preset : eq.presets) {
+            [_eqPresetPopup addItemWithTitle:EqPresetName(preset)];
+            _eqPresetPopup.lastItem.tag = preset.id;
+        }
+    }
+
+    // A preset the device didn't list (e.g. "Manual" after editing bands) still needs to show.
+    if ([_eqPresetPopup indexOfItemWithTag:s.eqPreset] < 0) {
+        [_eqPresetPopup addItemWithTitle:EqPresetName(EqPreset{ s.eqPreset, "" })];
+        _eqPresetPopup.lastItem.tag = s.eqPreset;
+    }
+    [_eqPresetPopup selectItemWithTag:s.eqPreset];
+
+    int half = (eq.levelSteps - 1) / 2;
+    for (NSUInteger i = 0; i < _eqSliders.count && i < s.eqBands.size(); i++) {
+        int value = (int)s.eqBands[i] - half;
+        if (!mouseDown)
+            _eqSliders[i].intValue = value;
+        _eqValueLabels[i].stringValue = EqValueText(value);
+    }
+
+    BOOL enabled = eq.enabled;
+    _eqPresetPopup.enabled = _eqFlatButton.enabled = enabled;
+    for (NSSlider* slider in _eqSliders)
+        slider.enabled = enabled;
+    _eqHint.stringValue = enabled ? @"" : @"The headphones have the equalizer turned off right now.";
+    _eqHint.hidden = enabled;
+}
+
+- (NSView*)buildOptimizerCard {
+    _optimizeButton = [NSButton buttonWithTitle:@"Optimize" target:self action:@selector(optimizeClicked:)];
+    _optimizeStatus = MakeLabel(@"Tunes noise cancelling to your head shape and air pressure. Takes about 15 seconds.",
+                                [NSFont systemFontOfSize:12], NSColor.secondaryLabelColor);
+    _optimizeStatus.maximumNumberOfLines = 2;
+    _optimizeStatus.lineBreakMode = NSLineBreakByWordWrapping;
+    [_optimizeStatus setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView* row = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 12, @[_optimizeStatus, MakeSpacer(), _optimizeButton]);
+    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 0, @[row]);
+    [row.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
+    return [self cardWithTitle:@"NC Optimizer" symbol:@"dial.medium" body:body];
+}
+
+- (NSView*)buildDevicesCard {
+    _devicesList = MakeStack(NSUserInterfaceLayoutOrientationVertical, 8, @[]);
+    _devicesHint = MakeLabel(@"", [NSFont systemFontOfSize:11], NSColor.secondaryLabelColor);
+    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 10, @[_devicesList, _devicesHint]);
+    [_devicesList.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
+    return [self cardWithTitle:@"Paired Devices" symbol:@"laptopcomputer.and.iphone" body:body];
+}
+
+#pragma mark - Status item
+
+- (void)setUpStatusItem {
+    _statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
+    NSImage* image = [NSImage imageWithSystemSymbolName:@"headphones" accessibilityDescription:@"Sony Headphones"];
+    [image setTemplate:YES];
+    _statusItem.button.image = image;
+    NSMenu* menu = [NSMenu new];
+    menu.delegate = self;
+    menu.autoenablesItems = NO;
+    _statusItem.menu = menu;
+}
+
+- (void)menuNeedsUpdate:(NSMenu*)menu {
+    [menu removeAllItems];
+    BOOL ready = _state == ConnectionStateReady;
+
+    NSMenuItem* status = [[NSMenuItem alloc] initWithTitle:[self headerStatusText] action:nil keyEquivalent:@""];
+    status.enabled = NO;
+    [menu addItem:status];
+
+    if (ready && (g_headphones->getCapabilities() & DEVICE_CAPABILITIES::NC_ASM)) {
+        [menu addItem:[NSMenuItem separatorItem]];
+        NoiseMode current = [self noiseModeForSettings:g_headphones->getSettings()];
+        NSArray* titles = @[@"Noise Cancelling", @"Ambient Sound", @"Off"];
+        for (NSInteger mode = 0; mode < 3; mode++) {
+            NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:titles[mode] action:@selector(menuNoiseModeSelected:) keyEquivalent:@""];
+            item.target = self;
+            item.tag = mode;
+            item.state = mode == current ? NSControlStateValueOn : NSControlStateValueOff;
+            [menu addItem:item];
+        }
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* show = [[NSMenuItem alloc] initWithTitle:@"Show Window" action:@selector(showWindow:) keyEquivalent:@""];
+    show.target = self;
+    [menu addItem:show];
+    NSMenuItem* settings = [[NSMenuItem alloc] initWithTitle:@"Settings…" action:@selector(showSettings:) keyEquivalent:@""];
+    settings.target = self;
+    [menu addItem:settings];
+    NSMenuItem* quit = [[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(terminate:) keyEquivalent:@"q"];
+    quit.target = NSApp;
+    [menu addItem:quit];
+}
+
+- (void)menuNoiseModeSelected:(NSMenuItem*)sender {
+    [self applyNoiseMode:(NoiseMode)sender.tag windNoise:_windNoise.state == NSControlStateValueOn];
+    [self refreshUI];
+}
+
+- (void)showWindow:(id)sender {
+    [(AppDelegate*)NSApp.delegate showMainWindow];
+}
+
+- (void)showSettings:(id)sender {
+    [(AppDelegate*)NSApp.delegate showSettings:sender];
+}
+
+#pragma mark - Connection
+
+- (void)autoConnectToLastDevice {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:kAutoConnectKey])
+        return;
+    NSString* address = [[NSUserDefaults standardUserDefaults] stringForKey:kLastDeviceKey];
+    if (address.length == 0)
+        return;
+    try {
+        for (const auto& device : g_bt->getConnectedDevices()) {
+            NSString* mac = @(device.mac.c_str());
+            if ([mac caseInsensitiveCompare:address] == NSOrderedSame) {
+                [self connectToAddress:mac name:@(device.name.c_str())];
+                return;
             }
-            index++;
         }
-        [self->soundPosition selectItemAtIndex:index];
-        if (headphones->isSetAsmLevelAvailable()){
-            [self->ANCSlider setEnabled:TRUE];
-            [self->ANCValuePrefixLabel setTextColor:NSColor.labelColor];
-            [self->ANCValueLabel setTextColor:NSColor.labelColor];
-        }
-        else {
-            [self->ANCValuePrefixLabel setTextColor:NSColor.tertiaryLabelColor];
-            [self->ANCValueLabel setTextColor:NSColor.tertiaryLabelColor];
-            [self->focusOnVoice setEnabled:FALSE];
-            [self->ANCSlider setEnabled:FALSE];
+    } catch (const std::exception&) {
+        // Bluetooth unavailable; the user can connect manually.
+    }
+}
+
+- (void)connectClicked:(NSButton*)sender {
+    if (_state != ConnectionStateDisconnected) {
+        [self disconnectWithMessage:nil];
+        return;
+    }
+
+    NSMenu* menu = [NSMenu new];
+    menu.autoenablesItems = NO;
+    std::vector<BluetoothDevice> devices;
+    try {
+        devices = g_bt->getConnectedDevices();
+    } catch (const std::exception& e) {
+        [self showMessage:@(e.what()) isError:YES];
+    }
+
+    NSMenuItem* header = [[NSMenuItem alloc] initWithTitle:devices.empty() ? @"No connected Bluetooth devices" : @"Connected Bluetooth devices"
+                                                    action:nil keyEquivalent:@""];
+    header.enabled = NO;
+    [menu addItem:header];
+    for (const auto& device : devices) {
+        NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:@(device.name.c_str()) action:@selector(deviceMenuSelected:) keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = @(device.mac.c_str());
+        item.image = [NSImage imageWithSystemSymbolName:@"headphones" accessibilityDescription:nil];
+        [menu addItem:item];
+    }
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* other = [[NSMenuItem alloc] initWithTitle:@"Choose Another Device…" action:@selector(chooseOtherDevice:) keyEquivalent:@""];
+    other.target = self;
+    [menu addItem:other];
+
+    [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, NSHeight(sender.bounds) + 4) inView:sender];
+}
+
+- (void)deviceMenuSelected:(NSMenuItem*)item {
+    [self connectToAddress:item.representedObject name:item.title];
+}
+
+- (void)chooseOtherDevice:(id)sender {
+    IOBluetoothDeviceSelectorController* selector = [IOBluetoothDeviceSelectorController deviceSelector];
+    if ([selector runModal] != kIOBluetoothUISuccess)
+        return;
+    IOBluetoothDevice* device = [[selector getResults] lastObject];
+    if (device)
+        [self connectToAddress:device.addressString name:device.nameOrAddress];
+}
+
+- (void)connectToAddress:(NSString*)address name:(NSString*)name {
+    if (_state != ConnectionStateDisconnected || address.length == 0)
+        return;
+
+    NSUInteger generation = ++_generation;
+    _state = ConnectionStateConnecting;
+    _deviceName = name;
+    _devicesSignature = nil;
+    [self showMessage:nil isError:NO];
+    [self refreshUI];
+
+    std::string mac = address.UTF8String;
+    __weak ViewController* weakSelf = self;
+    dispatch_async(_ioQueue, ^{
+        NSString* error = nil;
+        try {
+            g_headphones->resetState();
+            g_bt->connect(mac);
+            // The RFCOMM channel opens asynchronously.
+            for (int i = 0; i < 50 && !g_bt->isConnected(); i++)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (!g_bt->isConnected())
+                throw RecoverableException("The headphones didn't accept the connection in time.", true);
+
+            g_listenerRunning = true;
+            g_listener = std::make_unique<Listener>(*g_headphones, *g_bt, g_listenerRunning);
+            g_listenerThread = std::thread(&Listener::listen, g_listener.get());
+        } catch (const std::exception& e) {
+            error = @(e.what());
+            StopConnection();
         }
 
-        [self->ANCValueLabel setIntValue:headphones->getAsmLevel()];
-        [self->ANCSlider setIntValue:headphones->getAsmLevel()];
-        if (headphones->isFocusOnVoiceAvailable()) {
-            [self->focusOnVoice setTitle:@"Focus on Voice"];
-            [self->focusOnVoice setEnabled:TRUE];
-            statusItem.button.image = [NSImage imageNamed:@"NSFlowViewTemplate"];
-        }
-        else {
-            [self->focusOnVoice setTitle:@"Focus on Voice isn't enabled on this level."];
-            statusItem.button.image = [NSImage imageNamed:@"NSHomeTemplate"];
-            [self->focusOnVoice setEnabled:FALSE];
-        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ViewController* strongSelf = weakSelf;
+            if (!strongSelf || strongSelf->_generation != generation)
+                return;
+            if (error) {
+                strongSelf->_state = ConnectionStateDisconnected;
+                [strongSelf showMessage:[@"Couldn't connect: " stringByAppendingString:error] isError:YES];
+                [strongSelf refreshUI];
+                return;
+            }
+            [[NSUserDefaults standardUserDefaults] setObject:address forKey:kLastDeviceKey];
+            [[NSUserDefaults standardUserDefaults] setObject:name forKey:kLastDeviceNameKey];
+            [strongSelf syncStateForGeneration:generation];
+        });
     });
 }
 
+// Read every supported setting from the headphones. Controls stay disabled until this finishes,
+// so nothing is sent to the device based on placeholder values.
+- (void)syncStateForGeneration:(NSUInteger)generation {
+    _state = ConnectionStateSyncing;
+    [self refreshUI];
+
+    __weak ViewController* weakSelf = self;
+    dispatch_async(_ioQueue, ^{
+        bool complete = false;
+        NSString* error = nil;
+        try {
+            complete = g_headphones->syncState(kSyncTimeout);
+        } catch (const std::exception& e) {
+            error = @(e.what());
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ViewController* strongSelf = weakSelf;
+            if (!strongSelf || strongSelf->_generation != generation || strongSelf->_state == ConnectionStateDisconnected)
+                return;
+            if (error) {
+                [strongSelf disconnectWithMessage:[@"Lost connection while reading settings: " stringByAppendingString:error]];
+                return;
+            }
+            strongSelf->_state = ConnectionStateReady;
+            if (g_headphones->getCapabilities() == 0)
+                [strongSelf showMessage:@"The headphones didn't report which features they support. Showing the standard controls; some may not work." isError:YES];
+            else if (!complete)
+                [strongSelf showMessage:@"Some settings couldn't be read from the headphones, so they may not match. Use Reload Settings to try again." isError:YES];
+            [strongSelf refreshUI];
+        });
+    });
+}
+
+- (void)reloadClicked:(id)sender {
+    if (_state != ConnectionStateReady)
+        return;
+    [self showMessage:nil isError:NO];
+    [self syncStateForGeneration:_generation];
+}
+
+- (void)disconnectWithMessage:(NSString*)message {
+    if (_state == ConnectionStateDisconnected)
+        return;
+    _generation++;
+    _state = ConnectionStateDisconnected;
+    _applying = NO;
+    _devicesSignature = nil;
+    [self showMessage:message isError:YES];
+    [self refreshUI];
+    dispatch_async(_ioQueue, ^{
+        StopConnection();
+        g_headphones->resetState();
+    });
+}
+
+- (void)checkConnection:(NSTimer*)timer {
+    if ((_state == ConnectionStateSyncing || _state == ConnectionStateReady) && !g_bt->isConnected())
+        [self disconnectWithMessage:@"The connection to the headphones was lost."];
+}
+
+#pragma mark - Sending changes
+
+// Send pending changes on the I/O queue. Changes made while a send is in progress are
+// picked up by the loop (or by the follow-up call), so rapid slider moves coalesce.
+- (void)scheduleApply {
+    if (_state != ConnectionStateReady || _applying || !g_headphones->isChanged())
+        return;
+    _applying = YES;
+    NSUInteger generation = _generation;
+    [self refreshHeader];
+
+    __weak ViewController* weakSelf = self;
+    dispatch_async(_ioQueue, ^{
+        NSString* error = nil;
+        bool lostConnection = false;
+        try {
+            for (int i = 0; i < 20 && g_headphones->isChanged(); i++)
+                g_headphones->setChanges();
+        } catch (const RecoverableException& e) {
+            error = @(e.what());
+            lostConnection = e.shouldDisconnect;
+        } catch (const std::exception& e) {
+            error = @(e.what());
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ViewController* strongSelf = weakSelf;
+            if (!strongSelf || strongSelf->_generation != generation)
+                return;
+            strongSelf->_applying = NO;
+            if (lostConnection) {
+                [strongSelf disconnectWithMessage:[@"Disconnected: " stringByAppendingString:error]];
+                return;
+            }
+            if (error)
+                [strongSelf showMessage:[@"Couldn't apply the change: " stringByAppendingString:error] isError:YES];
+            [strongSelf refreshUI];
+            [strongSelf scheduleApply];
+        });
+    });
+}
+
+#pragma mark - Control actions
+
+- (void)applyNoiseMode:(NoiseMode)mode windNoise:(BOOL)windNoise {
+    switch (mode) {
+        case NoiseModeCancelling:
+            g_headphones->setAmbientSoundControl(true);
+            g_headphones->setAsmLevel(windNoise ? 1 : 0);
+            break;
+        case NoiseModeAmbient:
+            g_headphones->setAmbientSoundControl(true);
+            g_headphones->setAsmLevel(_lastAmbientLevel);
+            if (_lastAmbientLevel <= MINIMUM_VOICE_FOCUS_STEP)
+                g_headphones->setFocusOnVoice(false);
+            break;
+        case NoiseModeOff:
+            g_headphones->setAmbientSoundControl(false);
+            break;
+    }
+    [self scheduleApply];
+}
+
+- (void)noiseModeChanged:(id)sender {
+    [self applyNoiseMode:(NoiseMode)_noiseMode.selectedSegment windNoise:_windNoise.state == NSControlStateValueOn];
+    [self refreshUI];
+}
+
+- (void)ambientLevelChanged:(id)sender {
+    _lastAmbientLevel = _ambientSlider.intValue;
+    g_headphones->setAmbientSoundControl(true);
+    g_headphones->setAsmLevel(_lastAmbientLevel);
+    if (_lastAmbientLevel <= MINIMUM_VOICE_FOCUS_STEP)
+        g_headphones->setFocusOnVoice(false);
+    [self scheduleApply];
+    [self refreshUI];
+}
+
+- (void)focusOnVoiceChanged:(id)sender {
+    g_headphones->setFocusOnVoice(_focusOnVoice.state == NSControlStateValueOn);
+    [self scheduleApply];
+}
+
+- (void)vptChanged:(id)sender {
+    g_headphones->setVptType((int)_vptPopup.indexOfSelectedItem);
+    if (_vptPopup.indexOfSelectedItem != 0)
+        g_headphones->setSurroundPosition(SOUND_POSITION_PRESET::OFF);
+    [self scheduleApply];
+    [self refreshUI];
+}
+
+- (void)positionChanged:(id)sender {
+    NSInteger index = _positionPopup.indexOfSelectedItem;
+    g_headphones->setSurroundPosition(SOUND_POSITION_PRESET_ARRAY[index]);
+    if (index != 0)
+        g_headphones->setVptType(0);
+    [self scheduleApply];
+    [self refreshUI];
+}
+
+- (void)s2cChanged:(id)sender {
+    g_headphones->setS2CToggle(_s2cSwitch.state == NSControlStateValueOn ? S2C_TOGGLE::ACTIVE : S2C_TOGGLE::INACTIVE);
+    g_headphones->setS2COptions((int)_s2cSensitivity.indexOfSelectedItem,
+                                _s2cVoice.state == NSControlStateValueOn,
+                                (int)_s2cAutoClose.indexOfSelectedItem);
+    [self scheduleApply];
+    [self refreshUI];
+}
+
+- (void)optimizeClicked:(id)sender {
+    bool optimizing = g_headphones->getSettings().optimizerState == OPTIMIZER_STATE::OPTIMIZING;
+    g_headphones->setOptimizerState(optimizing ? OPTIMIZER_STATE::IDLE : OPTIMIZER_STATE::OPTIMIZING);
+    [self scheduleApply];
+    [self refreshUI];
+}
+
+- (void)deviceButtonClicked:(NSButton*)sender {
+    int index = (int)sender.tag;
+    auto slots = g_headphones->getConnectedDevices();
+    if (index == slots.first)
+        g_headphones->setMultiPointConnection(1, 0);
+    else if (index == slots.second)
+        g_headphones->setMultiPointConnection(2, 0);
+    else if (slots.first == 0)
+        g_headphones->setMultiPointConnection(1, index);
+    else if (slots.second == 0)
+        g_headphones->setMultiPointConnection(2, index);
+    [self scheduleApply];
+}
+
+#pragma mark - Refreshing the UI from state
+
+- (void)deviceStateChanged {
+    if (_state == ConnectionStateSyncing || _state == ConnectionStateReady)
+        [self refreshUI];
+}
+
+- (void)showMessage:(NSString*)message isError:(BOOL)isError {
+    _messageLabel.stringValue = message ?: @"";
+    _messageLabel.textColor = isError ? NSColor.systemRedColor : NSColor.secondaryLabelColor;
+    _messageLabel.hidden = message.length == 0;
+}
+
+- (NoiseMode)noiseModeForSettings:(const HeadphonesSettings&)s {
+    if (!s.ambientSoundControl)
+        return NoiseModeOff;
+    return s.asmLevel < kAmbientMinLevel ? NoiseModeCancelling : NoiseModeAmbient;
+}
+
+- (NSString*)headerStatusText {
+    switch (_state) {
+        case ConnectionStateDisconnected: return @"Not connected";
+        case ConnectionStateConnecting: return @"Connecting…";
+        case ConnectionStateSyncing: return @"Reading settings from the headphones…";
+        case ConnectionStateReady: return _applying ? @"Connected · applying changes…" : @"Connected · in sync";
+    }
+    return @"";
+}
+
+- (void)refreshHeader {
+    BOOL connected = _state != ConnectionStateDisconnected;
+    BOOL busy = _state == ConnectionStateConnecting || _state == ConnectionStateSyncing || _applying;
+
+    DeviceStatus device = g_headphones->getDeviceStatus();
+    NSString* model = device.modelName.empty() ? nil : @(device.modelName.c_str());
+    _deviceNameLabel.stringValue = !connected ? @"No headphones" : (model ?: (_deviceName.length ? _deviceName : @"Headphones"));
+
+    NSMutableArray<NSString*>* details = [NSMutableArray array];
+    if (_state == ConnectionStateReady) {
+        if (!device.firmwareVersion.empty())
+            [details addObject:[@"Firmware " stringByAppendingString:@(device.firmwareVersion.c_str())]];
+        if (device.hasCodec && device.codec != AUDIO_CODEC::UNSETTLED)
+            [details addObject:CodecName(device.codec)];
+        if (device.hasUpscaling)
+            [details addObject:[NSString stringWithFormat:@"%@ %@", UpscalingName(device.upscalingType),
+                                device.upscalingActive ? @"active" : @"off"]];
+    }
+    _detailLabel.stringValue = [details componentsJoinedByString:@" · "];
+    _detailLabel.hidden = details.count == 0;
+    _statusLabel.stringValue = [self headerStatusText];
+    _statusLabel.textColor = _state == ConnectionStateReady ? NSColor.systemGreenColor : NSColor.secondaryLabelColor;
+    if (busy)
+        [_spinner startAnimation:nil];
+    else
+        [_spinner stopAnimation:nil];
+
+    _connectButton.title = connected ? @"Disconnect" : @"Connect…";
+    _connectButton.keyEquivalent = connected ? @"" : @"\r";
+    _reloadButton.hidden = _state != ConnectionStateReady;
+
+    // Prefer the level reported over the protocol; fall back to the connector (e.g. BlueZ on Linux).
+    int battery = !connected ? -1 : device.batteryLevel >= 0 ? device.batteryLevel : g_bt->getBatteryLevel();
+    _batteryIcon.hidden = _batteryLabel.hidden = battery < 0;
+    if (battery >= 0) {
+        NSString* symbol = device.charging ? @"battery.100.bolt"
+            : battery > 87 ? @"battery.100" : battery > 62 ? @"battery.75" : battery > 37 ? @"battery.50" : battery > 12 ? @"battery.25" : @"battery.0";
+        _batteryIcon.image = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:nil];
+        _batteryIcon.contentTintColor = device.charging ? NSColor.systemGreenColor
+            : battery <= 15 ? NSColor.systemRedColor : NSColor.secondaryLabelColor;
+        _batteryLabel.stringValue = [NSString stringWithFormat:@"%d%%", battery];
+        _batteryLabel.toolTip = device.charging ? @"Charging" : nil;
+    }
+
+    _statusItem.button.appearsDisabled = _state != ConnectionStateReady;
+}
+
+- (void)refreshUI {
+    [self refreshHeader];
+
+    BOOL ready = _state == ConnectionStateReady;
+    unsigned int caps = g_headphones->getCapabilities();
+    if (ready && caps == 0)
+        caps = DEVICE_CAPABILITIES::NC_ASM | DEVICE_CAPABILITIES::VPT; // device didn't say; offer the basics
+
+    _emptyCard.hidden = _state != ConnectionStateDisconnected;
+    _noiseCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::NC_ASM);
+    _soundCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::VPT);
+    _s2cCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::SPEAK_TO_CHAT);
+    _optimizerCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::OPTIMIZER);
+    _eqCard.hidden = !ready || !g_headphones->getEqCapability().available;
+    _devicesCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::MULTI_POINT);
+    if (!ready)
+        return;
+
+    HeadphonesSettings s = g_headphones->getSettings();
+    BOOL mouseDown = NSEvent.pressedMouseButtons != 0;
+
+    // Noise control
+    NoiseMode mode = [self noiseModeForSettings:s];
+    if (mode == NoiseModeAmbient)
+        _lastAmbientLevel = s.asmLevel;
+    _noiseMode.selectedSegment = mode;
+    _ncOptions.hidden = mode != NoiseModeCancelling;
+    _windNoise.state = (mode == NoiseModeCancelling && s.asmLevel == 1) ? NSControlStateValueOn : NSControlStateValueOff;
+    _ambientOptions.hidden = mode != NoiseModeAmbient;
+    int steps = g_headphones->getAmbientSteps();
+    if (_ambientSlider.maxValue != steps + 1) {
+        _ambientSlider.maxValue = steps + 1;
+        _ambientSlider.numberOfTickMarks = steps;
+    }
+    if (!mouseDown) // don't fight the user while they drag
+        _ambientSlider.intValue = _lastAmbientLevel;
+    _ambientValue.stringValue = [NSString stringWithFormat:@"%d", _lastAmbientLevel - kAmbientMinLevel + 1];
+    _ambientValue.toolTip = [NSString stringWithFormat:@"Level %d of %d", _lastAmbientLevel - kAmbientMinLevel + 1, steps];
+    BOOL voiceAvailable = _lastAmbientLevel > MINIMUM_VOICE_FOCUS_STEP;
+    _focusOnVoice.enabled = voiceAvailable;
+    _focusOnVoice.state = (voiceAvailable && s.focusOnVoice) ? NSControlStateValueOn : NSControlStateValueOff;
+    _focusOnVoice.toolTip = voiceAvailable ? nil : @"Raise the ambient level to use Focus on voice";
+
+    // Sound
+    [_vptPopup selectItemAtIndex:std::clamp(s.vptType, 0, (int)_vptPopup.numberOfItems - 1)];
+    NSInteger positionIndex = 0;
+    for (NSInteger i = 0; i < _positionPopup.numberOfItems; i++)
+        if (SOUND_POSITION_PRESET_ARRAY[i] == s.surroundPosition)
+            positionIndex = i;
+    [_positionPopup selectItemAtIndex:positionIndex];
+
+    // Speak-to-Chat
+    BOOL s2cOn = s.speakToChat == S2C_TOGGLE::ACTIVE;
+    _s2cSwitch.state = s2cOn ? NSControlStateValueOn : NSControlStateValueOff;
+    [_s2cSensitivity selectItemAtIndex:std::clamp(s.s2cSensitivity, 0, (int)_s2cSensitivity.numberOfItems - 1)];
+    [_s2cAutoClose selectItemAtIndex:std::clamp(s.s2cOffTime, 0, (int)_s2cAutoClose.numberOfItems - 1)];
+    _s2cVoice.state = s.s2cVoice ? NSControlStateValueOn : NSControlStateValueOff;
+    _s2cSensitivity.enabled = _s2cAutoClose.enabled = _s2cVoice.enabled = s2cOn;
+
+    // Optimizer
+    BOOL optimizing = s.optimizerState == OPTIMIZER_STATE::OPTIMIZING;
+    _optimizeButton.title = optimizing ? @"Stop" : @"Optimize";
+    _optimizeStatus.stringValue = optimizing ? @"Optimizing… keep the headphones on and stay still."
+                                             : @"Tunes noise cancelling to your head shape and air pressure. Takes about 15 seconds.";
+
+    [self refreshDevicesList];
+    if (!_eqCard.hidden)
+        [self refreshEq:s mouseDown:mouseDown];
+}
+
+- (void)refreshDevicesList {
+    std::vector<BluetoothDevice> devices = g_headphones->getDevices();
+    auto slots = g_headphones->getConnectedDevices();
+
+    NSMutableString* signature = [NSMutableString stringWithFormat:@"%d,%d", slots.first, slots.second];
+    for (const auto& d : devices)
+        [signature appendFormat:@"|%s|%s", d.mac.c_str(), d.name.c_str()];
+    if ([signature isEqualToString:_devicesSignature])
+        return;
+    _devicesSignature = signature;
+
+    for (NSView* row in [_devicesList.arrangedSubviews copy])
+        [row removeFromSuperview];
+
+    BOOL slotFree = slots.first == 0 || slots.second == 0;
+    // Index 0 is a placeholder meaning "no device".
+    for (int i = 1; i < (int)devices.size(); i++) {
+        BOOL connected = i == slots.first || i == slots.second;
+        NSString* name = devices[i].name.empty() ? @(devices[i].mac.c_str()) : @(devices[i].name.c_str());
+        NSTextField* nameLabel = MakeLabel(name, [NSFont systemFontOfSize:13], NSColor.labelColor);
+        nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [nameLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        NSImageView* dot = MakeSymbol(@"circle.fill", 7, connected ? NSColor.systemGreenColor : NSColor.tertiaryLabelColor);
+        NSButton* button = [NSButton buttonWithTitle:connected ? @"Disconnect" : @"Connect" target:self action:@selector(deviceButtonClicked:)];
+        button.controlSize = NSControlSizeSmall;
+        button.tag = i;
+        button.enabled = connected || slotFree;
+        NSStackView* row = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 8, @[dot, nameLabel, MakeSpacer(), button]);
+        [_devicesList addArrangedSubview:row];
+        [row.widthAnchor constraintEqualToAnchor:_devicesList.widthAnchor].active = YES;
+    }
+
+    if (devices.size() <= 1)
+        _devicesHint.stringValue = @"The headphones haven't reported any paired devices.";
+    else if (!slotFree)
+        _devicesHint.stringValue = @"Two devices are connected. Disconnect one to connect another.";
+    else
+        _devicesHint.stringValue = @"Up to two devices can be connected at the same time.";
+}
 
 @end

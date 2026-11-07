@@ -12,7 +12,22 @@
 #import "Headphones.h"
 #import "MacOSBluetoothConnector.h"
 
-@interface AppDelegate : NSObject <NSApplicationDelegate>
-    @property (weak) NSWindow* window;
+// User defaults keys
+extern NSString* const kHideDockIconKey;  // BOOL: hide the Dock icon while the window is hidden
+extern NSString* const kAutoConnectKey;   // BOOL: connect to the last headphones on launch
 
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
+@property (weak) NSWindow* window;
+
+// Show the main window (restoring the Dock icon if it was hidden).
+- (void)showMainWindow;
+// Hide the main window; removes the Dock icon when kHideDockIconKey is set.
+- (void)hideMainWindow;
+- (IBAction)showSettings:(id)sender;
+@end
+
+// Main window class (set in Main.storyboard). With kHideDockIconKey set, minimizing
+// hides the window to the menu bar instead of the Dock, since there is no Dock icon
+// to restore it from.
+@interface MainWindow : NSWindow
 @end
