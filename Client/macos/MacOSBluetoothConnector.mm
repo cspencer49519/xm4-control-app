@@ -6,9 +6,10 @@ MacOSBluetoothConnector::MacOSBluetoothConnector()
 }
 MacOSBluetoothConnector::~MacOSBluetoothConnector()
 {
-    // onclose event
-    if (isConnected()){
-        disconnect();
+    disconnect();
+    if (rfcommDevice) {
+        CFBridgingRelease(rfcommDevice);
+        rfcommDevice = nullptr;
     }
 }
 
@@ -21,11 +22,15 @@ MacOSBluetoothConnector::~MacOSBluetoothConnector()
 @implementation AsyncCommDelegate {
 }
 - (void)rfcommChannelClosed:(IOBluetoothRFCOMMChannel *)rfcommChannel{
-    delegateCPP->disconnect();
+    // Runs on the connection thread, so it must not join that thread (disconnect() does).
+    if (delegateCPP)
+        delegateCPP->onChannelClosed();
 }
 
 -(void)rfcommChannelData:(IOBluetoothRFCOMMChannel *)rfcommChannel data:(void *)dataPointer length:(size_t)dataLength
 {
+    if (!delegateCPP)
+        return;
     std::lock_guard<std::mutex> g(delegateCPP->receiveDataMutex);
     
     unsigned char* buffer = (unsigned char*)dataPointer;
@@ -40,7 +45,10 @@ MacOSBluetoothConnector::~MacOSBluetoothConnector()
 
 int MacOSBluetoothConnector::send(char* buf, size_t length)
 {
-    [(__bridge IOBluetoothRFCOMMChannel*)rfcommchannel writeSync:(void*)buf length:length];
+    std::lock_guard<std::mutex> g(channelMutex);
+    IOBluetoothRFCOMMChannel *chan = (__bridge IOBluetoothRFCOMMChannel*)rfcommchannel;
+    if (chan == nil || [chan writeSync:(void*)buf length:(UInt16)length] != kIOReturnSuccess)
+        throw RecoverableException("Couldn't send to the headphones.", true);
     return (int)length;
 }
 
@@ -56,20 +64,29 @@ void MacOSBluetoothConnector::connectToMac(MacOSBluetoothConnector* macOSBluetoo
     // get sppServiceRecord
     IOBluetoothSDPServiceRecord *sppServiceRecord = [device getServiceRecordForUUID:sppServiceUUID];
     // get rfcommChannelID from sppServiceRecord
-    UInt8 rfcommChannelID;
-    [sppServiceRecord getRFCOMMChannelID:&rfcommChannelID];
+    UInt8 rfcommChannelID = 0;
+    if (sppServiceRecord == nil || [sppServiceRecord getRFCOMMChannelID:&rfcommChannelID] != kIOReturnSuccess) {
+        connectPromise.set_exception(std::make_exception_ptr(
+            RecoverableException("This device doesn't expose the Sony headphones service.", false)));
+        return;
+    }
     // setup delegate
     AsyncCommDelegate* asyncCommDelegate = [[AsyncCommDelegate alloc] init];
     asyncCommDelegate->delegateCPP = macOSBluetoothConnector;
     // try to open channel
     if ( [device openRFCOMMChannelAsync:&channel withChannelID:rfcommChannelID delegate:asyncCommDelegate] != kIOReturnSuccess ) {
+        asyncCommDelegate->delegateCPP = nullptr;
         RecoverableException exc = RecoverableException("Could not open the rfcomm.", false);
         std::exception_ptr excPtr = std::make_exception_ptr(exc);
         connectPromise.set_exception(excPtr);
         return;
     }
-    // store the channel
-    macOSBluetoothConnector->rfcommchannel = (__bridge void*) channel;
+    // keep the channel and its delegate alive until closeConnection()
+    {
+        std::lock_guard<std::mutex> g(macOSBluetoothConnector->channelMutex);
+        macOSBluetoothConnector->rfcommchannel = (__bridge_retained void*) channel;
+        macOSBluetoothConnector->commDelegate = (__bridge_retained void*) asyncCommDelegate;
+    }
     
     macOSBluetoothConnector->running = true;
     
@@ -93,26 +110,50 @@ void MacOSBluetoothConnector::connect(const std::string& addrStr){
     NSString *addressNSString = [NSString stringWithCString:addrStr.c_str() encoding:[NSString defaultCStringEncoding]];
     // get device based on mac address
     IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:addressNSString];
+    if (device == nil) {
+        throw RecoverableException("Invalid Bluetooth address.", false);
+    }
     // if device is not connected
     if (![device isConnected]) {
         [device openConnection];
     }
+    // clean up after a previous connection whose thread already finished
+    if (uthread.joinable()) {
+        running = false;
+        disconnectionConditionVariable.notify_all();
+        uthread.join();
+    }
+    {
+        std::lock_guard<std::mutex> g(receiveDataMutex);
+        receivedBytes.clear();
+    }
     std::promise<void> connectPromise;
     std::future<void> connectFuture = connectPromise.get_future();
 
-    // store the device in a variable
-    rfcommDevice = (__bridge void*) device;
+    // keep the device alive for the connection thread
+    if (rfcommDevice)
+        CFBridgingRelease(rfcommDevice);
+    rfcommDevice = (__bridge_retained void*) device;
     uthread = std::thread(MacOSBluetoothConnector::connectToMac, this, std::move(connectPromise));
     
     // wait till the device is connected
-    connectFuture.get();
+    try {
+        connectFuture.get();
+    } catch (...) {
+        // the connection thread has already returned; reap it so a later connect can reuse uthread
+        if (uthread.joinable())
+            uthread.join();
+        throw;
+    }
 }
 
 int MacOSBluetoothConnector::recv(char* buf, size_t length)
 {
     // wait for newly received data
     std::unique_lock<std::mutex> g(receiveDataMutex);
-    receiveDataConditionVariable.wait(g, [this]{ return !receivedBytes.empty(); });
+    receiveDataConditionVariable.wait(g, [this]{ return !receivedBytes.empty() || !running; });
+    if (receivedBytes.empty())
+        return 0; // disconnected
     
     // fill the buf with the new data
     std::vector<unsigned char> receivedVector = receivedBytes.front();
@@ -143,7 +184,7 @@ std::vector<BluetoothDevice> MacOSBluetoothConnector::getConnectedDevices()
             BluetoothDevice dev;
             // save the mac address and name
             dev.mac = [[device addressString] UTF8String];
-            dev.name = [[device name] UTF8String];
+            dev.name = [[device nameOrAddress] UTF8String] ?: "";
             // add device to the connected devices vector
             res.push_back(dev);
         }
@@ -152,21 +193,50 @@ std::vector<BluetoothDevice> MacOSBluetoothConnector::getConnectedDevices()
     return res;
 }
 
+void MacOSBluetoothConnector::stopRunning() noexcept
+{
+    running = false;
+    // wake the connection thread
+    disconnectionConditionVariable.notify_all();
+    // wake any reader blocked in recv()
+    {
+        std::lock_guard<std::mutex> g(receiveDataMutex);
+    }
+    receiveDataConditionVariable.notify_all();
+}
+
+void MacOSBluetoothConnector::onChannelClosed() noexcept
+{
+    stopRunning();
+}
+
 void MacOSBluetoothConnector::disconnect() noexcept
 {
     // close connection
     closeConnection();
-    running = false;
-    // notify the other thread that we are done disconnecting
-    disconnectionConditionVariable.notify_all();
-    // wait for the thread to finish
-    uthread.join();
+    stopRunning();
+    // wait for the thread to finish (it may already have, or never have started)
+    if (uthread.joinable() && uthread.get_id() != std::this_thread::get_id())
+        uthread.join();
 }
 void MacOSBluetoothConnector::closeConnection() {
     // get the channel
-    IOBluetoothRFCOMMChannel *chan = (__bridge IOBluetoothRFCOMMChannel*) rfcommchannel;
+    IOBluetoothRFCOMMChannel *chan = nil;
+    AsyncCommDelegate *delegate = nil;
+    {
+        std::lock_guard<std::mutex> g(channelMutex);
+        // take ownership back; ARC releases both at the end of this function
+        chan = (__bridge_transfer IOBluetoothRFCOMMChannel*) rfcommchannel;
+        delegate = (__bridge_transfer AsyncCommDelegate*) commDelegate;
+        rfcommchannel = nullptr;
+        commDelegate = nullptr;
+    }
+    if (delegate)
+        delegate->delegateCPP = nullptr;
+    if (chan == nil)
+        return;
     [chan setDelegate: nil];
-    // close the channel
+    // close the channel (harmless if the remote side already closed it)
     [chan closeChannel];
 }
 
@@ -175,6 +245,7 @@ bool MacOSBluetoothConnector::isConnected() noexcept
 {
     if (!running)
         return false;
+    std::lock_guard<std::mutex> g(channelMutex);
     IOBluetoothRFCOMMChannel *chan = (__bridge IOBluetoothRFCOMMChannel*) rfcommchannel;
     return chan.isOpen;
 }

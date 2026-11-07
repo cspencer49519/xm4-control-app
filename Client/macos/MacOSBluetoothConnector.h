@@ -24,6 +24,8 @@ public:
     virtual void closeConnection();
     
     virtual std::vector<BluetoothDevice> getConnectedDevices() noexcept(false);
+    // Called from the RFCOMM delegate when the remote side closes the channel.
+    void onChannelClosed() noexcept;
     std::deque<std::vector<unsigned char>> receivedBytes;
     std::mutex receiveDataMutex;
     std::condition_variable receiveDataConditionVariable;
@@ -32,7 +34,16 @@ public:
     std::condition_variable disconnectionConditionVariable;
     
 private:
-    void *rfcommDevice;
-    void *rfcommchannel;
+    void stopRunning() noexcept;
+
+    // Objective-C objects held with a +1 retain (__bridge_retained) so they stay
+    // valid after IOBluetooth drops its own references, e.g. when the remote side
+    // closes the channel. Released exactly once in closeConnection()/the destructor.
+    // channelMutex guards rfcommchannel and commDelegate, which are used from the
+    // I/O queue, the listener thread and the main thread.
+    void *rfcommDevice = nullptr;
+    void *rfcommchannel = nullptr;
+    void *commDelegate = nullptr;
+    std::mutex channelMutex;
     std::thread uthread;
 };
