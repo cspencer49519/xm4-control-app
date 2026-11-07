@@ -1,4 +1,5 @@
 #include "Listener.h"
+#include "PacketLog.h"
 #include <iostream>
 
 Listener::Listener(Headphones& headphones, BluetoothWrapper& bt, std::atomic<bool>& running): 
@@ -21,6 +22,9 @@ void Listener::listen()
         {
             if (!this->_running) break;
             std::cerr << "Listener error: " << e.what() << std::endl;
+            PacketLog::note(e.what());
+            // Once the connection is gone every read fails immediately; stop instead of spinning.
+            if (!this->_bt.isConnected()) break;
         }
     }
 }
@@ -33,6 +37,8 @@ inline BtMessage Listener::parse(Buffer msg)
 void Listener::handle_message(Buffer msg)
 {
     BtMessage m = this->parse(msg);
+    bool handled = m.dataType == DATA_TYPE::ACK || m.dataType == DATA_TYPE::DATA_MDR || m.dataType == DATA_TYPE::DATA_MDR_NO2;
+    PacketLog::log(false, m.dataType, m.seqNumber, m.messageBytes, handled ? nullptr : "not handled, no ACK sent");
 
     if (m.dataType == DATA_TYPE::ACK)
     {

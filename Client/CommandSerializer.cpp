@@ -12,7 +12,6 @@ constexpr unsigned char ESCAPED_61 = 45;	    // 0x2D
 constexpr unsigned char ESCAPED_62 = 46;   	    // 0x2E
 
 
-constexpr int MAX_STEPS_WH_1000_XM3 = 19;
 
 namespace CommandSerializer
 {
@@ -166,24 +165,6 @@ namespace CommandSerializer
 		return ret;
 	}
 
-	NC_DUAL_SINGLE_VALUE getDualSingleForAsmLevel(char asmLevel)
-	{
-		NC_DUAL_SINGLE_VALUE val = NC_DUAL_SINGLE_VALUE::OFF;
-		if (asmLevel > MAX_STEPS_WH_1000_XM3)
-		{
-			throw std::runtime_error("Exceeded max steps");
-		}
-		else if (asmLevel == 1)
-		{
-			val = NC_DUAL_SINGLE_VALUE::SINGLE;
-		}
-		else if (asmLevel == 0)
-		{
-			val = NC_DUAL_SINGLE_VALUE::DUAL;
-		}
-		return val;
-	}
-
 	Buffer serializeXM4OptimizeCommand(OPTIMIZER_STATE state)
 	{
 	    Buffer ret;
@@ -194,17 +175,17 @@ namespace CommandSerializer
 	    return ret;
 	}
 
-	Buffer serializeNcAndAsmSetting(NC_ASM_EFFECT ncAsmEffect, NC_ASM_SETTING_TYPE ncAsmSettingType, ASM_SETTING_TYPE asmSettingType, ASM_ID asmId, char asmLevel)
+	Buffer serializeNcAndAsmSetting(NC_ASM_EFFECT ncAsmEffect, unsigned char ncAsmSettingType, unsigned char ncValue, unsigned char asmSettingType, ASM_ID asmId, unsigned char asmValue)
 	{
 		Buffer ret;
 		ret.push_back(static_cast<unsigned char>(COMMAND_TYPE::NCASM_SET_PARAM));
 		ret.push_back(static_cast<unsigned char>(NC_ASM_INQUIRED_TYPE::NOISE_CANCELLING_AND_AMBIENT_SOUND_MODE));
 		ret.push_back(static_cast<unsigned char>(ncAsmEffect));
-		ret.push_back(static_cast<unsigned char>(ncAsmSettingType));
-		ret.push_back(static_cast<unsigned char>(getDualSingleForAsmLevel(asmLevel)));
-		ret.push_back(static_cast<unsigned char>(asmSettingType));
+		ret.push_back(ncAsmSettingType);
+		ret.push_back(ncValue);
+		ret.push_back(asmSettingType);
 		ret.push_back(static_cast<unsigned char>(asmId));
-		ret.push_back(asmLevel);
+		ret.push_back(asmValue);
 		return ret;
 	}
 

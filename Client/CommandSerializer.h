@@ -7,7 +7,6 @@
 #include "Exceptions.h"
 
 constexpr int MINIMUM_VOICE_FOCUS_STEP = 2;
-constexpr unsigned int ASM_LEVEL_DISABLED = -1;
 
 struct BtMessage
 {
@@ -39,9 +38,12 @@ namespace CommandSerializer
 
 	BtMessage unpackBtMessage(const Buffer& src);
 
-	NC_DUAL_SINGLE_VALUE getDualSingleForAsmLevel(char asmLevel);
 	Buffer serializeXM4OptimizeCommand(OPTIMIZER_STATE state);
-	Buffer serializeNcAndAsmSetting(NC_ASM_EFFECT ncAsmEffect, NC_ASM_SETTING_TYPE ncAsmSettingType, ASM_SETTING_TYPE asmSettingType, ASM_ID asmId, char asmLevel);
+	// [0x68, 0x02, effect, ncAsmSettingType, ncValue, asmSettingType, asmId, asmValue]
+	// ncAsmSettingType/asmSettingType must echo the device's NCASM capability reply.
+	// ncValue: NC_DUAL_SINGLE_VALUE for DUAL_SINGLE_OFF devices, 0/1 for ON_OFF devices.
+	// asmValue: ambient level 1..steps, or 0 while noise cancelling is on.
+	Buffer serializeNcAndAsmSetting(NC_ASM_EFFECT ncAsmEffect, unsigned char ncAsmSettingType, unsigned char ncValue, unsigned char asmSettingType, ASM_ID asmId, unsigned char asmValue);
 	Buffer serializeVPTSetting(VPT_INQUIRED_TYPE type, unsigned char preset);
 	Buffer serializeXM4SpeakToChat(S2C_TOGGLE s2cState);
 	Buffer serializeXM4_S2C_Options(unsigned char sensitivity, unsigned char voice, unsigned char offTime);

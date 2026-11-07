@@ -1,4 +1,5 @@
 #include "BluetoothWrapper.h"
+#include "PacketLog.h"
 #include <chrono>
 
 BluetoothWrapper::BluetoothWrapper(std::unique_ptr<IBluetoothConnector> connector)
@@ -29,6 +30,7 @@ int BluetoothWrapper::sendCommand(const std::vector<char>& bytes, DATA_TYPE dtyp
 	{
 		std::lock_guard guard(this->_connectorMtx);
 		auto data = CommandSerializer::packageDataForBt(bytes, dtype, this->_seqNumber);
+		PacketLog::log(true, dtype, this->_seqNumber, bytes);
 		bytesSent = this->_connector->send(data.data(), data.size());
 	}
 
@@ -42,6 +44,7 @@ void BluetoothWrapper::sendAck(unsigned int seqNumber)
 {
 	std::lock_guard guard(this->_connectorMtx);
 	auto data = CommandSerializer::packageDataForBt({}, DATA_TYPE::ACK, seqNumber ^ 0x01);
+	PacketLog::log(true, DATA_TYPE::ACK, seqNumber ^ 0x01, {});
 	this->_connector->send(data.data(), data.size());
 }
 
@@ -74,6 +77,8 @@ void BluetoothWrapper::_waitForAck()
 	this->_ack.wait_for(guard, std::chrono::seconds(5), [this] { return this->_ackBuffer > 0; });
 	if (this->_ackBuffer > 0)
 		this->_ackBuffer--;
+	else
+		PacketLog::note("no ACK within 5 s");
 }
 
 void BluetoothWrapper::postAck()

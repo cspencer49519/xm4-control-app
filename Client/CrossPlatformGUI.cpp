@@ -223,7 +223,9 @@ void CrossPlatformGUI::cleanup()
 
 void CrossPlatformGUI::_drawBattery()
 {
-    int level = this->_bt.getBatteryLevel();
+    // Prefer the level reported over the protocol; fall back to the connector (BlueZ D-Bus on Linux).
+    DeviceStatus status = this->_headphones.getDeviceStatus();
+    int level = status.batteryLevel >= 0 ? status.batteryLevel : this->_bt.getBatteryLevel();
     if (level >= 0)
         ImGui::TextColored(COLOR_TEXT, "[Battery: %d%%]", level);
     else
@@ -494,12 +496,13 @@ void CrossPlatformGUI::_drawASMControls()
 
         ImGui::Text("Environment Level");
         ImGui::SameLine();
-        ImGui::TextDisabled("%d/19", this->_asmLevel);
+        const int maxLevel = this->_headphones.getAmbientSteps() + 1;
+        ImGui::TextDisabled("%d/%d", this->_asmLevel, maxLevel);
 
         float w = ImGui::GetContentRegionAvail().x;
         float h = 20.0f;
         ImVec2 pos = ImGui::GetCursorScreenPos();
-        float fill = (w > 0.0f) ? this->_asmLevel / 19.0f : 0.0f;
+        float fill = (w > 0.0f) ? this->_asmLevel / (float)maxLevel : 0.0f;
         float r = h * 0.5f;
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -516,9 +519,9 @@ void CrossPlatformGUI::_drawASMControls()
         if (ImGui::IsItemActive())
         {
             float mx = ImGui::GetMousePos().x - pos.x;
-            int val = (int)((mx / w) * 19.0f + 0.5f);
+            int val = (int)((mx / w) * (float)maxLevel + 0.5f);
             if (val < 0) val = 0;
-            if (val > 19) val = 19;
+            if (val > maxLevel) val = maxLevel;
             this->_asmLevel = val;
         }
 
