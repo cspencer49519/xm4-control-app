@@ -14,7 +14,8 @@
 
 // User defaults keys
 extern NSString* const kHideDockIconKey;  // BOOL: hide the Dock icon while the window is hidden
-extern NSString* const kAutoConnectKey;   // BOOL: connect to the last headphones on launch
+extern NSString* const kAutoConnectKey;   // BOOL: connect to the last headphones on launch and when they reconnect
+extern NSString* const kLowBatteryNotifyKey; // BOOL: notify at 20 % and 10 % battery
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property (weak) NSWindow* window;

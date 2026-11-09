@@ -320,6 +320,12 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = C0FFEE06283EC38600148E80 /* Signing.xcconfig */;
 			buildSettings = {
+				OTHER_LDFLAGS = (
+					"-framework",
+					ServiceManagement,
+					"-framework",
+					UserNotifications,
+				);
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
 				CODE_SIGN_ENTITLEMENTS = SonyHeadphonesClient.entitlements;
@@ -344,6 +350,12 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = C0FFEE06283EC38600148E80 /* Signing.xcconfig */;
 			buildSettings = {
+				OTHER_LDFLAGS = (
+					"-framework",
+					ServiceManagement,
+					"-framework",
+					UserNotifications,
+				);
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
 				CODE_SIGN_ENTITLEMENTS = SonyHeadphonesClient.entitlements;

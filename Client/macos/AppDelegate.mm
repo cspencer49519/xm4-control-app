@@ -6,9 +6,11 @@
 //
 
 #import "AppDelegate.h"
+#import <ServiceManagement/ServiceManagement.h>
 
 NSString* const kHideDockIconKey = @"HideDockIconWhenHidden";
 NSString* const kAutoConnectKey = @"AutoConnectOnLaunch";
+NSString* const kLowBatteryNotifyKey = @"NotifyLowBattery";
 
 static BOOL HideDockIconEnabled(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:kHideDockIconKey];
@@ -37,12 +39,14 @@ static BOOL HideDockIconEnabled(void) {
 
 @implementation AppDelegate {
     NSWindow* _settingsWindow;
+    NSButton* _launchAtLogin;
 }
 
 + (void)initialize {
     [[NSUserDefaults standardUserDefaults] registerDefaults:@{
         kHideDockIconKey: @NO,
         kAutoConnectKey: @YES,
+        kLowBatteryNotifyKey: @YES,
     }];
 }
 
@@ -123,14 +127,25 @@ static NSView* MakeNote(NSString* text) {
     if (!_settingsWindow) {
         NSButton* hideDock = MakeCheckbox(@"Hide Dock icon when the window is minimized or closed", kHideDockIconKey, self, @selector(toggleSetting:));
         NSView* hideDockNote = MakeNote(@"The app stays in the menu bar. Choose Show Window from the menu bar icon to bring the window and Dock icon back.");
-        NSButton* autoConnect = MakeCheckbox(@"Connect to the last used headphones on launch", kAutoConnectKey, self, @selector(toggleSetting:));
-        NSView* autoConnectNote = MakeNote(@"Only when they're already connected to this Mac in Bluetooth settings.");
+        NSButton* autoConnect = MakeCheckbox(@"Connect to the last used headphones automatically", kAutoConnectKey, self, @selector(toggleSetting:));
+        NSView* autoConnectNote = MakeNote(@"At launch, and whenever they connect to this Mac (for example when you turn them on).");
+        NSButton* lowBattery = MakeCheckbox(@"Notify when the battery is low", kLowBatteryNotifyKey, self, @selector(toggleSetting:));
+        NSView* lowBatteryNote = MakeNote(@"At 20% and 10%, once per charge.");
 
-        NSStackView* stack = [NSStackView stackViewWithViews:@[hideDock, hideDockNote, autoConnect, autoConnectNote]];
+        NSMutableArray<NSView*>* views = [NSMutableArray arrayWithArray:@[hideDock, hideDockNote, autoConnect, autoConnectNote, lowBattery, lowBatteryNote]];
+        if (@available(macOS 13.0, *)) {
+            _launchAtLogin = [NSButton checkboxWithTitle:@"Open at login" target:self action:@selector(toggleLaunchAtLogin:)];
+            [views addObject:_launchAtLogin];
+            [views addObject:MakeNote(@"Keep the app in /Applications so macOS can find it at login.")];
+        }
+
+        NSStackView* stack = [NSStackView stackViewWithViews:views];
         stack.orientation = NSUserInterfaceLayoutOrientationVertical;
         stack.alignment = NSLayoutAttributeLeading;
         stack.spacing = 6;
         [stack setCustomSpacing:18 afterView:hideDockNote];
+        [stack setCustomSpacing:18 afterView:autoConnectNote];
+        [stack setCustomSpacing:18 afterView:lowBatteryNote];
         stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
 
         _settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 420, 160)
@@ -143,6 +158,8 @@ static NSView* MakeNote(NSString* text) {
         _settingsWindow.delegate = self;
         [_settingsWindow center];
     }
+    if (@available(macOS 13.0, *))
+        [self updateLaunchAtLogin];
     if (NSApp.activationPolicy != NSApplicationActivationPolicyRegular)
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     [NSApp activateIgnoringOtherApps:YES];
@@ -151,6 +168,27 @@ static NSView* MakeNote(NSString* text) {
 
 - (void)toggleSetting:(NSButton*)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.state == NSControlStateValueOn forKey:sender.identifier];
+}
+
+// The checkbox mirrors the system's login item state (the user can also change it in System Settings).
+- (void)updateLaunchAtLogin API_AVAILABLE(macos(13.0)) {
+    SMAppServiceStatus status = SMAppService.mainAppService.status;
+    _launchAtLogin.state = status == SMAppServiceStatusEnabled || status == SMAppServiceStatusRequiresApproval
+        ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (void)toggleLaunchAtLogin:(NSButton*)sender API_AVAILABLE(macos(13.0)) {
+    SMAppService* service = SMAppService.mainAppService;
+    NSError* error = nil;
+    BOOL ok = sender.state == NSControlStateValueOn ? [service registerAndReturnError:&error] : [service unregisterAndReturnError:&error];
+    [self updateLaunchAtLogin];
+    if (!ok && error) {
+        NSAlert* alert = [NSAlert alertWithError:error];
+        alert.messageText = @"Couldn't change the login item";
+        [alert beginSheetModalForWindow:_settingsWindow completionHandler:nil];
+    } else if (service.status == SMAppServiceStatusRequiresApproval) {
+        [SMAppService openSystemSettingsLoginItems];
+    }
 }
 
 @end

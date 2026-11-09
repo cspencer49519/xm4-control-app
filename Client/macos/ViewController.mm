@@ -14,6 +14,7 @@
 
 #import "ViewController.h"
 #include "Listener.h"
+#import <UserNotifications/UserNotifications.h>
 
 #include <algorithm>
 #include <memory>
@@ -39,6 +40,16 @@ static const auto kSyncTimeout = std::chrono::milliseconds(8000);
 static NSString* const kLastDeviceKey = @"LastDeviceAddress";
 static NSString* const kLastDeviceNameKey = @"LastDeviceName";
 static NSString* const kSelectedTabKey = @"SelectedTab";
+// Automatic connects (launch, headphones reconnecting) retry quietly this many times.
+static const int kAutoConnectAttempts = 3;
+
+// Bluetooth addresses come as "88-c9-e8-..." or "88:C9:E8:..." depending on the API.
+static BOOL SameAddress(NSString* a, NSString* b) {
+    if (a.length == 0 || b.length == 0)
+        return NO;
+    NSString* (^norm)(NSString*) = ^(NSString* s) { return [[s stringByReplacingOccurrencesOfString:@":" withString:@"-"] lowercaseString]; };
+    return [norm(a) isEqualToString:norm(b)];
+}
 
 // Process-wide Bluetooth objects. Headphones keeps a reference to the wrapper,
 // so both live for the whole app lifetime.
@@ -190,8 +201,14 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
 - (BOOL)isFlipped { return YES; }
 @end
 
+@interface ViewController () <NSMenuItemValidation, UNUserNotificationCenterDelegate>
+@end
+
 @implementation ViewController {
     dispatch_queue_t _ioQueue;
+    IOBluetoothUserNotification* _connectNotification;
+    // Lowest low-battery threshold already notified for this discharge (101 = none).
+    int _lowBatteryNotified;
     ConnectionState _state;
     // Incremented on every connect/disconnect so stale async completions can be ignored.
     NSUInteger _generation;
@@ -322,6 +339,11 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
 
     [self buildUI];
     [self setUpStatusItem];
+    [self setUpMainMenu];
+    _lowBatteryNotified = 101;
+    UNUserNotificationCenter.currentNotificationCenter.delegate = self;
+    // Connect automatically when the last-used headphones connect to the Mac (e.g. turned on).
+    _connectNotification = [IOBluetoothDevice registerForConnectNotifications:self selector:@selector(bluetoothDeviceConnected:device:)];
 
     _connectionTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(checkConnection:) userInfo:nil repeats:YES];
 
@@ -342,6 +364,7 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
 }
 
 - (void)dealloc {
+    [_connectNotification unregister];
     [_connectionTimer invalidate];
     if (_terminateObserver)
         [[NSNotificationCenter defaultCenter] removeObserver:_terminateObserver];
@@ -1248,6 +1271,138 @@ static NSString* AssignableActionsText(unsigned char preset) {
     return [self cardWithTitle:@"Paired Devices" symbol:@"laptopcomputer.and.iphone" body:body];
 }
 
+#pragma mark - Main menu and shortcuts
+
+static NSMenuItem* ShortcutItem(NSString* title, id target, SEL action, NSString* key, NSEventModifierFlags mods, NSInteger tag) {
+    NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key];
+    item.keyEquivalentModifierMask = mods;
+    item.target = target;
+    item.tag = tag;
+    return item;
+}
+
+- (void)setUpMainMenu {
+    NSMenu* mainMenu = NSApp.mainMenu;
+    const NSEventModifierFlags cmd = NSEventModifierFlagCommand, optCmd = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    unichar left = NSLeftArrowFunctionKey, right = NSRightArrowFunctionKey, up = NSUpArrowFunctionKey, down = NSDownArrowFunctionKey;
+
+    NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Headphones"];
+    [menu addItem:ShortcutItem(@"Noise Cancelling", self, @selector(menuNoiseModeSelected:), @"1", optCmd, NoiseModeCancelling)];
+    [menu addItem:ShortcutItem(@"Ambient Sound", self, @selector(menuNoiseModeSelected:), @"2", optCmd, NoiseModeAmbient)];
+    [menu addItem:ShortcutItem(@"Noise Control Off", self, @selector(menuNoiseModeSelected:), @"3", optCmd, NoiseModeOff)];
+    [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItem:ShortcutItem(@"Play/Pause", self, @selector(playPauseClicked:), @"p", optCmd, 0)];
+    [menu addItem:ShortcutItem(@"Next Track", self, @selector(nextClicked:), [NSString stringWithCharacters:&right length:1], optCmd, 0)];
+    [menu addItem:ShortcutItem(@"Previous Track", self, @selector(previousClicked:), [NSString stringWithCharacters:&left length:1], optCmd, 0)];
+    [menu addItem:ShortcutItem(@"Volume Up", self, @selector(menuVolumeStep:), [NSString stringWithCharacters:&up length:1], optCmd, 1)];
+    [menu addItem:ShortcutItem(@"Volume Down", self, @selector(menuVolumeStep:), [NSString stringWithCharacters:&down length:1], optCmd, -1)];
+    [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItem:ShortcutItem(@"Reload Settings", self, @selector(reloadClicked:), @"r", cmd, 0)];
+    [menu addItem:ShortcutItem(@"Connect…", self, @selector(menuConnectToggle:), @"k", cmd, 0)];
+    NSMenuItem* top = [[NSMenuItem alloc] initWithTitle:@"Headphones" action:nil keyEquivalent:@""];
+    top.submenu = menu;
+    [mainMenu insertItem:top atIndex:1];
+
+    // View menu: tabs instead of the template's toolbar/sidebar items (this window has neither).
+    NSMenu* view = [mainMenu itemWithTitle:@"View"].submenu;
+    if (view) {
+        for (NSMenuItem* item in [view.itemArray copy])
+            if (item.action != @selector(toggleFullScreen:))
+                [view removeItem:item];
+        NSArray* titles = @[@"Sound", @"Controls", @"Connection"];
+        for (NSInteger i = 0; i < (NSInteger)titles.count; i++)
+            [view insertItem:ShortcutItem(titles[i], self, @selector(menuSelectTab:), [NSString stringWithFormat:@"%ld", (long)i + 1], cmd, i) atIndex:i];
+        [view insertItem:[NSMenuItem separatorItem] atIndex:titles.count];
+    }
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem*)item {
+    SEL action = item.action;
+    BOOL ready = _state == ConnectionStateReady;
+    if (action == @selector(menuSelectTab:)) {
+        item.state = _tabBar.selectedSegment == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
+        return ready;
+    }
+    if (action == @selector(menuConnectToggle:)) {
+        item.title = _state == ConnectionStateDisconnected ? @"Connect…" : @"Disconnect";
+        return _state == ConnectionStateDisconnected || _state == ConnectionStateReady;
+    }
+    if (action == @selector(reloadClicked:))
+        return ready;
+    if (action == @selector(menuNoiseModeSelected:)) {
+        if (item.menu != _statusItem.menu)
+            item.state = ready && [self noiseModeForSettings:g_headphones->getSettings()] == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
+        return ready && (g_headphones->getCapabilities() & DEVICE_CAPABILITIES::NC_ASM);
+    }
+    PlaybackCapability playback = g_headphones->getPlaybackCapability();
+    if (action == @selector(playPauseClicked:)) {
+        if (item.menu != _statusItem.menu)
+            item.title = g_headphones->getPlaybackState().status == PLAYBACK_STATUS::PLAYING ? @"Pause" : @"Play";
+        return ready && playback.transport;
+    }
+    if (action == @selector(nextClicked:) || action == @selector(previousClicked:))
+        return ready && playback.transport;
+    if (action == @selector(menuVolumeStep:))
+        return ready && playback.volumeSteps > 0 && g_headphones->getPlaybackState().volume >= 0;
+    return YES;
+}
+
+- (void)menuSelectTab:(NSMenuItem*)sender {
+    _tabBar.selectedSegment = sender.tag;
+    [self tabChanged:_tabBar];
+}
+
+- (void)menuVolumeStep:(NSMenuItem*)sender {
+    int volume = g_headphones->getPlaybackState().volume;
+    if (volume < 0)
+        return;
+    g_headphones->setVolume(volume + (int)sender.tag);
+    [self scheduleApply];
+    [self refreshUI];
+}
+
+- (void)menuConnectToggle:(id)sender {
+    [(AppDelegate*)NSApp.delegate showMainWindow];
+    [self connectClicked:_connectButton];
+}
+
+#pragma mark - Notifications
+
+- (void)checkLowBattery:(int)battery charging:(BOOL)charging {
+    if (charging || battery > 25) {
+        _lowBatteryNotified = 101; // re-arm once charged
+        return;
+    }
+    int threshold = battery <= 10 ? 10 : battery <= 20 ? 20 : 101;
+    if (threshold >= _lowBatteryNotified)
+        return; // already told the user at this level
+    _lowBatteryNotified = threshold;
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:kLowBatteryNotifyKey])
+        return;
+
+    NSString* title = [_deviceNameLabel.stringValue stringByAppendingString:@" battery low"];
+    NSString* body = [NSString stringWithFormat:@"%d%% left. Charge them soon.", battery];
+    UNUserNotificationCenter* center = UNUserNotificationCenter.currentNotificationCenter;
+    [center requestAuthorizationWithOptions:UNAuthorizationOptionAlert | UNAuthorizationOptionSound
+                          completionHandler:^(BOOL granted, NSError* error) {
+        if (!granted)
+            return;
+        UNMutableNotificationContent* content = [UNMutableNotificationContent new];
+        content.title = title;
+        content.body = body;
+        content.sound = UNNotificationSound.defaultSound;
+        [center addNotificationRequest:[UNNotificationRequest requestWithIdentifier:@"low-battery" content:content trigger:nil]
+                 withCompletionHandler:nil];
+    }];
+}
+
+// Show notifications even while the app is in front.
+- (void)userNotificationCenter:(UNUserNotificationCenter*)center
+       willPresentNotification:(UNNotification*)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
+    completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionSound);
+}
+
 #pragma mark - Status item
 
 - (void)setUpStatusItem {
@@ -1265,7 +1420,15 @@ static NSString* AssignableActionsText(unsigned char preset) {
     [menu removeAllItems];
     BOOL ready = _state == ConnectionStateReady;
 
-    NSMenuItem* status = [[NSMenuItem alloc] initWithTitle:[self headerStatusText] action:nil keyEquivalent:@""];
+    NSString* statusText = [self headerStatusText];
+    if (ready) {
+        DeviceStatus device = g_headphones->getDeviceStatus();
+        NSString* model = device.modelName.empty() ? (_deviceName ?: @"Headphones") : @(device.modelName.c_str());
+        statusText = device.batteryLevel >= 0
+            ? [NSString stringWithFormat:@"%@ · %d%%%@", model, device.batteryLevel, device.charging ? @" (charging)" : @""]
+            : model;
+    }
+    NSMenuItem* status = [[NSMenuItem alloc] initWithTitle:statusText action:nil keyEquivalent:@""];
     status.enabled = NO;
     [menu addItem:status];
 
@@ -1334,14 +1497,30 @@ static NSString* AssignableActionsText(unsigned char preset) {
     try {
         for (const auto& device : g_bt->getConnectedDevices()) {
             NSString* mac = @(device.mac.c_str());
-            if ([mac caseInsensitiveCompare:address] == NSOrderedSame) {
-                [self connectToAddress:mac name:@(device.name.c_str())];
+            if (SameAddress(mac, address)) {
+                [self connectToAddress:mac name:@(device.name.c_str()) attempt:1];
                 return;
             }
         }
     } catch (const std::exception&) {
         // Bluetooth unavailable; the user can connect manually.
     }
+}
+
+// IOBluetooth connect notification (main thread): fires for every device that connects.
+- (void)bluetoothDeviceConnected:(IOBluetoothUserNotification*)note device:(IOBluetoothDevice*)device {
+    if (_state != ConnectionStateDisconnected || ![[NSUserDefaults standardUserDefaults] boolForKey:kAutoConnectKey])
+        return;
+    NSString* lastAddress = [[NSUserDefaults standardUserDefaults] stringForKey:kLastDeviceKey];
+    if (!SameAddress(device.addressString, lastAddress))
+        return;
+    NSString* address = device.addressString;
+    NSString* name = device.nameOrAddress;
+    // The headphones' control channel isn't ready the moment audio connects.
+    [self showMessage:nil isError:NO];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        [self connectToAddress:address name:name attempt:1];
+    });
 }
 
 - (void)connectClicked:(NSButton*)sender {
@@ -1392,6 +1571,11 @@ static NSString* AssignableActionsText(unsigned char preset) {
 }
 
 - (void)connectToAddress:(NSString*)address name:(NSString*)name {
+    [self connectToAddress:address name:name attempt:0];
+}
+
+// attempt 0: the user asked; errors are shown. attempt >= 1: automatic; retried quietly.
+- (void)connectToAddress:(NSString*)address name:(NSString*)name attempt:(int)attempt {
     if (_state != ConnectionStateDisconnected || address.length == 0)
         return;
 
@@ -1429,6 +1613,13 @@ static NSString* AssignableActionsText(unsigned char preset) {
                 return;
             if (error) {
                 strongSelf->_state = ConnectionStateDisconnected;
+                if (attempt >= 1 && attempt < kAutoConnectAttempts) {
+                    [strongSelf refreshUI];
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                        [weakSelf connectToAddress:address name:name attempt:attempt + 1];
+                    });
+                    return;
+                }
                 [strongSelf showMessage:[@"Couldn't connect: " stringByAppendingString:error] isError:YES];
                 [strongSelf refreshUI];
                 return;
@@ -1498,7 +1689,9 @@ static NSString* AssignableActionsText(unsigned char preset) {
 
 - (void)checkConnection:(NSTimer*)timer {
     if ((_state == ConnectionStateSyncing || _state == ConnectionStateReady) && !g_bt->isConnected())
-        [self disconnectWithMessage:@"The connection to the headphones was lost."];
+        [self disconnectWithMessage:[[NSUserDefaults standardUserDefaults] boolForKey:kAutoConnectKey]
+            ? @"The headphones disconnected. They'll reconnect here automatically when they're back."
+            : @"The connection to the headphones was lost."];
 }
 
 #pragma mark - Sending changes
@@ -1704,6 +1897,8 @@ static NSString* AssignableActionsText(unsigned char preset) {
             : battery <= 15 ? NSColor.systemRedColor : NSColor.secondaryLabelColor;
         _batteryLabel.stringValue = [NSString stringWithFormat:@"%d%%", battery];
         _batteryLabel.toolTip = device.charging ? @"Charging" : nil;
+        if (_state == ConnectionStateReady)
+            [self checkLowBattery:battery charging:device.charging];
     }
 
     _statusItem.button.appearsDisabled = _state != ConnectionStateReady;
