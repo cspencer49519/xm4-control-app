@@ -81,6 +81,10 @@ Model name `05 01 0a "WH-1000XM4"`, firmware `05 02 05 "3.0.1"`, battery
 `11 00 5a 00` (90 %, not charging), codec `19 00 02` (AAC), upscaling
 `15 00 02 01` (DSEE Extreme, active). Unsolicited after connect: codec/upscaling
 notifications (`1b`, `17`), playback status `a5 01 00 0x` and volume `a9 01 20 1e` (30).
+Playback capability `a1 01 1f 01 01` (31 volume steps, play/pause/track keys, metadata). With nothing playing on the
+Mac, every name query returned SETTLED with length 0 (`a7 01 00 02 00`). In a later session (after the multipoint
+setting had been toggled) the
+supported-function list also contained 0x38 (PAIRING_DEVICE_MANAGEMENT_CLASSIC_BT).
 
 
 ---
@@ -1483,8 +1487,10 @@ Same value encoding as above. Booleans: `D8 Dx 01 00|01`. Lists: `D8 Dx 02 idx`.
 **PlayInquiredType**: `0x00 NO_USE`, `0x01 PLAYBACK_CONTROLLER`, `0xFF`. Only 0x01 is used.
 
 RET_CAPABILITY `[A1, 01, volumeSteps, playbackControlType, metaDataDisplayType]`
-- volumeSteps: unsigned 0..255. The app builder calls it "volume step" (`DeviceCapabilityTableset1Builder.java`). Volume
-  values are then 0..volumeSteps (range inferred).
+- volumeSteps: unsigned 0..255. The app builder calls it "volume step" (`DeviceCapabilityTableset1Builder.java`). It is
+  the number of levels including 0: the WH-1000XM4 (fw 3.0.1) replies `a1 01 1f 01 01` (31 steps, transport and metadata
+  supported) and has reported volume 30 (`a7 01 20 1e`) but never 31. Values are taken as 0..volumeSteps-1, as with EQ
+  steps (inferred; to be confirmed at full volume).
 - PlaybackControlType: `0x00 NOT_SUPPORT`, `0x01 PLAY_PAUSE_TRACKUP_TRACKDOWN`.
 - MetaDataDisplayType: `0x00 NOT_SUPPORT`, `0x01 TRACK_ALBUM_ARTIST_GENRE_PLAYER`.
 
@@ -1691,7 +1697,7 @@ The voice-guidance *volume* is not part of the v1 table2 messages in this app (i
 4. **GENERAL_SETTING ENUM_NAME list items:** the localized-key table for list items was not extracted. Which GS slot
    (D1/D2/D3) carries TOUCH_PANEL vs MULTIPOINT on XM4 is device-reported. Discover it from the capability subject.
 5. **GS GET_CAPABILITY displayLanguage:** that this byte selects the RAW_NAME language is inferred.
-6. **PLAY volume range:** 0..volumeSteps is inferred from the "volume step" naming.
+6. **PLAY volume range:** 0..volumeSteps-1 is inferred from the XM4 capture (31 steps, volume 30 seen) and the EQ steps convention.
 7. **PLAY NTFY_PARAM name types:** these carry only the type byte. "Re-query" is an inference.
 8. **ALERT:** the exact moment the app sends `94 01 00` was not traced. What happens if no 0x98 reply arrives
    (timeout/default) is unknown.

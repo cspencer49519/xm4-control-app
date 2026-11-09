@@ -135,7 +135,7 @@
                 <windowController id="B8D-0N-5wS" sceneMemberID="viewController">
                     <window key="window" title="Sony Headphones" customClass="MainWindow" allowsToolTipsWhenApplicationIsInactive="NO" autorecalculatesKeyViewLoop="NO" releasedWhenClosed="NO" visibleAtLaunch="NO" animationBehavior="default" id="IQv-IB-iLA">
                         <windowStyleMask key="styleMask" titled="YES" closable="YES" miniaturizable="YES" resizable="YES"/>
-                        <rect key="contentRect" x="0.0" y="995" width="460" height="640"/>
+                        <rect key="contentRect" x="0.0" y="995" width="520" height="780"/>
                         <rect key="screenRect" x="0.0" y="0.0" width="1920" height="1200"/>
                         <value key="minSize" type="size" width="420" height="420"/>
                     </window>
@@ -152,7 +152,7 @@
             <objects>
                 <viewController id="XfG-lQ-9wD" customClass="ViewController" sceneMemberID="viewController">
                     <view key="view" id="m2S-Jp-Qdl">
-                        <rect key="frame" x="0.0" y="0.0" width="460" height="640"/>
+                        <rect key="frame" x="0.0" y="0.0" width="520" height="780"/>
                         <autoresizingMask key="autoresizingMask"/>
                     </view>
                 </viewController>

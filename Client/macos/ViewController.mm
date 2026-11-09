@@ -38,6 +38,7 @@ static const int kAmbientMinLevel = 2;
 static const auto kSyncTimeout = std::chrono::milliseconds(8000);
 static NSString* const kLastDeviceKey = @"LastDeviceAddress";
 static NSString* const kLastDeviceNameKey = @"LastDeviceName";
+static NSString* const kSelectedTabKey = @"SelectedTab";
 
 // Process-wide Bluetooth objects. Headphones keeps a reference to the wrapper,
 // so both live for the whole app lifetime.
@@ -213,6 +214,23 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
     NSButton* _connectButton;
     NSButton* _reloadButton;
     NSTextField* _messageLabel;
+
+    // Tabs
+    NSSegmentedControl* _tabBar;
+    NSTabView* _tabView;
+
+    // Now playing
+    NSView* _nowPlayingCard;
+    NSStackView* _transportButtons;
+    NSButton* _previousButton;
+    NSButton* _playPauseButton;
+    NSButton* _nextButton;
+    NSTextField* _trackLabel;
+    NSTextField* _artistLabel;
+    NSStackView* _volumeRow;
+    NSSlider* _volumeSlider;
+    NSTextField* _volumeValue;
+    BOOL _metadataRefreshQueued;
 
     // Cards
     NSView* _emptyCard;
@@ -423,21 +441,13 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
 
 #pragma mark - Build UI
 
-- (void)buildUI {
-    NSView* root = self.view;
-
+// A scrolling column of cards, used for each tab (scrolls only if the window is short).
+- (NSScrollView*)tabColumnWithCards:(NSArray<NSView*>*)cards {
     NSScrollView* scroll = [NSScrollView new];
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
     scroll.hasVerticalScroller = YES;
     scroll.autohidesScrollers = YES;
     scroll.drawsBackground = NO;
-    [root addSubview:scroll];
-    [NSLayoutConstraint activateConstraints:@[
-        [scroll.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
-        [scroll.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
-        [scroll.topAnchor constraintEqualToAnchor:root.topAnchor],
-        [scroll.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
-    ]];
 
     FlippedView* document = [FlippedView new];
     document.translatesAutoresizingMaskIntoConstraints = NO;
@@ -449,32 +459,9 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
         [document.topAnchor constraintEqualToAnchor:clip.topAnchor],
     ]];
 
-    NSView* header = [self buildHeaderCard];
-    _emptyCard = [self buildEmptyCard];
-    _noiseCard = [self buildNoiseCard];
-    _soundCard = [self buildSoundCard];
-    _s2cCard = [self buildSpeakToChatCard];
-    _optimizerCard = [self buildOptimizerCard];
-    _eqCard = [self buildEqCard];
-    _connectionGrid = MakeFormGrid(@[]);
-    _controlsGrid = MakeFormGrid(@[]);
-    _connectionCard = [self cardWithTitle:@"Sound & Connection" symbol:@"antenna.radiowaves.left.and.right" body:_connectionGrid];
-    NSButton* powerOff = [NSButton buttonWithTitle:@"Power Off Headphones" target:self action:@selector(powerOffClicked:)];
-    powerOff.image = [NSImage imageWithSystemSymbolName:@"power" accessibilityDescription:nil];
-    powerOff.imagePosition = NSImageLeading;
-    _powerOffButton = powerOff;
-    NSStackView* controlsBody = MakeStack(NSUserInterfaceLayoutOrientationVertical, 14, @[_controlsGrid, powerOff]);
-    _controlsCard = [self cardWithTitle:@"Controls & Power" symbol:@"hand.tap" body:controlsBody];
-    _settingControls = [NSMutableArray array];
-    _assignableHints = [NSMutableDictionary dictionary];
-    _devicesCard = [self buildDevicesCard];
-    NSTextField* footer = MakeLabel(@"Unofficial client. Settings stay in sync with the headphones.",
-                                    [NSFont systemFontOfSize:11], NSColor.tertiaryLabelColor);
-
-    NSArray<NSView*>* cards = @[header, _emptyCard, _noiseCard, _eqCard, _soundCard, _s2cCard, _connectionCard, _controlsCard, _optimizerCard, _devicesCard];
-    NSStackView* column = MakeStack(NSUserInterfaceLayoutOrientationVertical, 14, [cards arrayByAddingObject:footer]);
+    NSStackView* column = MakeStack(NSUserInterfaceLayoutOrientationVertical, 14, cards);
     column.alignment = NSLayoutAttributeCenterX;
-    column.edgeInsets = NSEdgeInsetsMake(18, 18, 18, 18);
+    column.edgeInsets = NSEdgeInsetsMake(4, 18, 18, 18);
     [document addSubview:column];
     [NSLayoutConstraint activateConstraints:@[
         [column.leadingAnchor constraintEqualToAnchor:document.leadingAnchor],
@@ -484,12 +471,239 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
     ]];
     for (NSView* card in cards)
         [card.widthAnchor constraintEqualToAnchor:column.widthAnchor constant:-36].active = YES;
+    return scroll;
+}
+
+- (void)buildUI {
+    NSView* root = self.view;
+
+    NSView* header = [self buildHeaderCard];
+    _nowPlayingCard = [self buildNowPlayingCard];
+    _emptyCard = [self buildEmptyCard];
+    _noiseCard = [self buildNoiseCard];
+    _soundCard = [self buildSoundCard];
+    _s2cCard = [self buildSpeakToChatCard];
+    _optimizerCard = [self buildOptimizerCard];
+    _eqCard = [self buildEqCard];
+    _connectionGrid = MakeFormGrid(@[]);
+    _controlsGrid = MakeFormGrid(@[]);
+    _connectionCard = [self cardWithTitle:@"Connection & Audio Quality" symbol:@"antenna.radiowaves.left.and.right" body:_connectionGrid];
+    NSButton* powerOff = [NSButton buttonWithTitle:@"Power Off Headphones" target:self action:@selector(powerOffClicked:)];
+    powerOff.image = [NSImage imageWithSystemSymbolName:@"power" accessibilityDescription:nil];
+    powerOff.imagePosition = NSImageLeading;
+    _powerOffButton = powerOff;
+    NSStackView* controlsBody = MakeStack(NSUserInterfaceLayoutOrientationVertical, 14, @[_controlsGrid, powerOff]);
+    _controlsCard = [self cardWithTitle:@"Buttons & Power" symbol:@"hand.tap" body:controlsBody];
+    _settingControls = [NSMutableArray array];
+    _assignableHints = [NSMutableDictionary dictionary];
+    _devicesCard = [self buildDevicesCard];
+
+    // Tabs: a segmented control drives a tabless NSTabView.
+    NSArray<NSString*>* tabTitles = @[@"Sound", @"Controls", @"Connection"];
+    NSArray<NSString*>* tabSymbols = @[@"waveform", @"hand.tap", @"antenna.radiowaves.left.and.right"];
+    NSArray<NSArray<NSView*>*>* tabCards = @[
+        @[_noiseCard, _eqCard, _soundCard, _optimizerCard],
+        @[_s2cCard, _controlsCard],
+        @[_connectionCard, _devicesCard],
+    ];
+    _tabBar = [NSSegmentedControl segmentedControlWithLabels:tabTitles
+                                                trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                      target:self
+                                                      action:@selector(tabChanged:)];
+    _tabBar.segmentDistribution = NSSegmentDistributionFillEqually;
+    _tabBar.translatesAutoresizingMaskIntoConstraints = NO;
+    _tabView = [NSTabView new];
+    _tabView.tabViewType = NSNoTabsNoBorder;
+    _tabView.drawsBackground = NO;
+    _tabView.translatesAutoresizingMaskIntoConstraints = NO;
+    for (NSUInteger i = 0; i < tabTitles.count; i++) {
+        [_tabBar setImage:[NSImage imageWithSystemSymbolName:tabSymbols[i] accessibilityDescription:nil] forSegment:i];
+        [_tabBar setImageScaling:NSImageScaleProportionallyDown forSegment:i];
+        NSTabViewItem* item = [NSTabViewItem tabViewItemWithViewController:[NSViewController new]];
+        item.label = tabTitles[i];
+        item.view = [self tabColumnWithCards:tabCards[i]];
+        [_tabView addTabViewItem:item];
+    }
+    NSInteger savedTab = [[NSUserDefaults standardUserDefaults] integerForKey:kSelectedTabKey];
+    savedTab = std::clamp<NSInteger>(savedTab, 0, tabTitles.count - 1);
+    _tabBar.selectedSegment = savedTab;
+    [_tabView selectTabViewItemAtIndex:savedTab];
+
+    // Fixed top area: header, now playing, tab bar (or the getting-started card).
+    NSStackView* top = MakeStack(NSUserInterfaceLayoutOrientationVertical, 12, @[header, _nowPlayingCard, _emptyCard, _tabBar]);
+    top.alignment = NSLayoutAttributeCenterX;
+    top.edgeInsets = NSEdgeInsetsMake(18, 18, 6, 18);
+    for (NSView* v in @[header, _nowPlayingCard, _emptyCard])
+        [v.widthAnchor constraintEqualToAnchor:top.widthAnchor constant:-36].active = YES;
+    [_tabBar.widthAnchor constraintLessThanOrEqualToConstant:420].active = YES;
+    NSLayoutConstraint* tabWidth = [_tabBar.widthAnchor constraintEqualToAnchor:top.widthAnchor constant:-36];
+    tabWidth.priority = NSLayoutPriorityDefaultHigh;
+    tabWidth.active = YES;
+    [root addSubview:top];
+    [root addSubview:_tabView];
+    [NSLayoutConstraint activateConstraints:@[
+        [top.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+        [top.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
+        [top.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [_tabView.topAnchor constraintEqualToAnchor:top.bottomAnchor constant:6],
+        [_tabView.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+        [_tabView.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
+        [_tabView.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+    ]];
+}
+
+- (void)tabChanged:(NSSegmentedControl*)sender {
+    [_tabView selectTabViewItemAtIndex:sender.selectedSegment];
+    [[NSUserDefaults standardUserDefaults] setInteger:sender.selectedSegment forKey:kSelectedTabKey];
+}
+
+#pragma mark - Now playing
+
+static NSButton* MakeSymbolButton(NSString* symbol, CGFloat size, id target, SEL action, NSString* tip) {
+    NSImageSymbolConfiguration* config = [NSImageSymbolConfiguration configurationWithPointSize:size weight:NSFontWeightRegular];
+    NSImage* image = [[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:tip] imageWithSymbolConfiguration:config];
+    NSButton* button = [NSButton buttonWithImage:image target:target action:action];
+    button.bordered = NO;
+    button.toolTip = tip;
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    [button.widthAnchor constraintEqualToConstant:size + 14].active = YES;
+    return button;
+}
+
+- (NSView*)buildNowPlayingCard {
+    _previousButton = MakeSymbolButton(@"backward.fill", 15, self, @selector(previousClicked:), @"Previous track");
+    _playPauseButton = MakeSymbolButton(@"play.fill", 20, self, @selector(playPauseClicked:), @"Play");
+    _nextButton = MakeSymbolButton(@"forward.fill", 15, self, @selector(nextClicked:), @"Next track");
+    _transportButtons = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 2, @[_previousButton, _playPauseButton, _nextButton]);
+
+    _trackLabel = MakeLabel(@"", [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], NSColor.labelColor);
+    _artistLabel = MakeLabel(@"", [NSFont systemFontOfSize:11], NSColor.secondaryLabelColor);
+    for (NSTextField* label in @[_trackLabel, _artistLabel]) {
+        label.lineBreakMode = NSLineBreakByTruncatingTail;
+        [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    }
+    NSStackView* titles = MakeStack(NSUserInterfaceLayoutOrientationVertical, 1, @[_trackLabel, _artistLabel]);
+    titles.alignment = NSLayoutAttributeLeading;
+    for (NSTextField* label in @[_trackLabel, _artistLabel])
+        [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow + 10 forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    _volumeSlider = [NSSlider sliderWithValue:0 minValue:0 maxValue:30 target:self action:@selector(volumeChanged:)];
+    _volumeSlider.continuous = YES;
+    _volumeSlider.controlSize = NSControlSizeSmall;
+    _volumeSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    _volumeSlider.toolTip = @"Headphone volume";
+    [_volumeSlider.widthAnchor constraintGreaterThanOrEqualToConstant:90].active = YES;
+    // Track names get the room first; the slider takes what's left, up to 150.
+    [_volumeSlider.widthAnchor constraintLessThanOrEqualToConstant:150].active = YES;
+    NSLayoutConstraint* volumeWidth = [_volumeSlider.widthAnchor constraintEqualToConstant:150];
+    volumeWidth.priority = NSLayoutPriorityDefaultLow - 10;
+    volumeWidth.active = YES;
+    _volumeValue = MakeLabel(@"", [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular], NSColor.secondaryLabelColor);
+    _volumeValue.alignment = NSTextAlignmentRight;
+    [_volumeValue.widthAnchor constraintEqualToConstant:20].active = YES;
+    _volumeRow = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 6, @[
+        MakeSymbol(@"speaker.fill", 11, NSColor.secondaryLabelColor), _volumeSlider, _volumeValue,
+    ]);
+
+    NSStackView* row = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 12, @[_transportButtons, titles, MakeSpacer(), _volumeRow]);
+    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 0, @[row]);
+    [row.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
+    return [self cardWithTitle:nil symbol:nil body:body];
+}
+
+- (void)sendPlaybackControl:(PLAYBACK_CONTROL)control {
+    if (_state != ConnectionStateReady)
+        return;
+    dispatch_async(_ioQueue, ^{
+        try {
+            g_headphones->sendPlaybackControl(control);
+        } catch (const std::exception&) {
+            // A lost connection is picked up by checkConnection:.
+        }
+    });
+}
+
+- (void)playPauseClicked:(id)sender {
+    bool playing = g_headphones->getPlaybackState().status == PLAYBACK_STATUS::PLAYING;
+    [self sendPlaybackControl:playing ? PLAYBACK_CONTROL::PAUSE : PLAYBACK_CONTROL::PLAY];
+}
+
+- (void)previousClicked:(id)sender {
+    [self sendPlaybackControl:PLAYBACK_CONTROL::PREVIOUS_TRACK];
+}
+
+- (void)nextClicked:(id)sender {
+    [self sendPlaybackControl:PLAYBACK_CONTROL::NEXT_TRACK];
+}
+
+- (void)volumeChanged:(NSSlider*)sender {
+    g_headphones->setVolume(sender.intValue);
+    _volumeValue.stringValue = [NSString stringWithFormat:@"%d", sender.intValue];
+    [self scheduleApply];
+}
+
+- (void)refreshNowPlaying:(BOOL)mouseDown {
+    PlaybackCapability cap = g_headphones->getPlaybackCapability();
+    PlaybackState ps = g_headphones->getPlaybackState();
+    _nowPlayingCard.hidden = !cap.available;
+    if (!cap.available)
+        return;
+
+    // Track names arrive as "changed" notifications and are fetched off the listener thread.
+    if (g_headphones->hasStalePlaybackMetadata() && !_metadataRefreshQueued) {
+        _metadataRefreshQueued = YES;
+        __weak ViewController* weakSelf = self;
+        dispatch_async(_ioQueue, ^{
+            try {
+                g_headphones->refreshPlaybackMetadata();
+            } catch (const std::exception&) {
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ViewController* strongSelf = weakSelf;
+                if (strongSelf)
+                    strongSelf->_metadataRefreshQueued = NO;
+            });
+        });
+    }
+
+    bool playing = ps.status == PLAYBACK_STATUS::PLAYING;
+    _transportButtons.hidden = !cap.transport;
+    NSImageSymbolConfiguration* config = [NSImageSymbolConfiguration configurationWithPointSize:20 weight:NSFontWeightRegular];
+    _playPauseButton.image = [[NSImage imageWithSystemSymbolName:playing ? @"pause.fill" : @"play.fill"
+                                       accessibilityDescription:playing ? @"Pause" : @"Play"] imageWithSymbolConfiguration:config];
+    _playPauseButton.toolTip = playing ? @"Pause" : @"Play";
+
+    NSString* track = ps.track.empty() ? nil : @(ps.track.c_str());
+    NSMutableArray<NSString*>* subtitle = [NSMutableArray array];
+    for (const std::string* part : { &ps.artist, &ps.album })
+        if (!part->empty())
+            [subtitle addObject:@(part->c_str())];
+    NSString* status = playing ? @"Playing" : ps.status == PLAYBACK_STATUS::PAUSED ? @"Paused"
+                     : ps.status == PLAYBACK_STATUS::STOPPED ? @"Stopped" : @"Not playing";
+    _trackLabel.stringValue = track ?: status;
+    if (subtitle.count == 0 && !ps.player.empty())
+        [subtitle addObject:@(ps.player.c_str())];
+    if (subtitle.count == 0 && track)
+        [subtitle addObject:status];
+    _artistLabel.stringValue = [subtitle componentsJoinedByString:@" — "];
+    _artistLabel.hidden = subtitle.count == 0;
+
+    bool hasVolume = cap.volumeSteps > 0 && ps.volume >= 0;
+    _volumeRow.hidden = !hasVolume;
+    if (hasVolume) {
+        if (_volumeSlider.maxValue != cap.volumeSteps - 1)
+            _volumeSlider.maxValue = cap.volumeSteps - 1;
+        if (!mouseDown)
+            _volumeSlider.intValue = ps.volume;
+        _volumeValue.stringValue = [NSString stringWithFormat:@"%d", ps.volume];
+    }
 }
 
 - (NSView*)buildHeaderCard {
     _deviceNameLabel = MakeLabel(@"No headphones", [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold], NSColor.labelColor);
     _deviceNameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [_deviceNameLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    // Shrinks only after the spacer is gone.
+    [_deviceNameLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow + 10 forOrientation:NSLayoutConstraintOrientationHorizontal];
     _statusLabel = MakeLabel(@"Not connected", [NSFont systemFontOfSize:12], NSColor.secondaryLabelColor);
 
     _spinner = [NSProgressIndicator new];
@@ -505,18 +719,22 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
     _detailLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [_detailLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     NSStackView* titles = MakeStack(NSUserInterfaceLayoutOrientationVertical, 2, @[_deviceNameLabel, _statusLabel, _detailLabel]);
-    NSStackView* top = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 12, @[
-        MakeSymbol(@"headphones", 28, NSColor.controlAccentColor), titles, MakeSpacer(), _spinner, _batteryIcon, _batteryLabel,
-    ]);
-
     _connectButton = [NSButton buttonWithTitle:@"Connect…" target:self action:@selector(connectClicked:)];
     _connectButton.bezelStyle = NSBezelStyleRounded;
     _connectButton.keyEquivalent = @"\r";
-    _reloadButton = [NSButton buttonWithTitle:@"Reload Settings" target:self action:@selector(reloadClicked:)];
-    _reloadButton.image = [NSImage imageWithSystemSymbolName:@"arrow.clockwise" accessibilityDescription:nil];
-    _reloadButton.imagePosition = NSImageLeading;
+    _reloadButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"arrow.clockwise" accessibilityDescription:@"Reload settings"]
+                                       target:self action:@selector(reloadClicked:)];
+    _reloadButton.bezelStyle = NSBezelStyleRounded;
+    _connectButton.controlSize = _reloadButton.controlSize = NSControlSizeSmall;
     _reloadButton.toolTip = @"Read every setting from the headphones again";
-    NSStackView* buttons = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 8, @[_connectButton, _reloadButton]);
+
+    NSStackView* top = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 12, @[
+        MakeSymbol(@"headphones", 28, NSColor.controlAccentColor), titles, MakeSpacer(), _spinner, _batteryIcon, _batteryLabel,
+        _reloadButton, _connectButton,
+    ]);
+    [top setCustomSpacing:4 afterView:_batteryIcon];
+    [top setCustomSpacing:16 afterView:_batteryLabel];
+    [top setCustomSpacing:6 afterView:_reloadButton];
 
     _messageLabel = MakeLabel(@"", [NSFont systemFontOfSize:12], NSColor.systemRedColor);
     _messageLabel.maximumNumberOfLines = 4;
@@ -525,7 +743,7 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
     _messageLabel.hidden = YES;
     [_messageLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 12, @[top, buttons, _messageLabel]);
+    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 10, @[top, _messageLabel]);
     [top.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
     [_messageLabel.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
     return [self cardWithTitle:nil symbol:nil body:body];
@@ -748,7 +966,10 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
 #pragma mark - Device settings
 
 static NSTextField* GridLabel(NSString* text) {
-    return MakeLabel(text, [NSFont systemFontOfSize:13], NSColor.labelColor);
+    NSTextField* label = MakeLabel(text, [NSFont systemFontOfSize:13], NSColor.labelColor);
+    // The control column gives way first; labels stay readable.
+    [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
+    return label;
 }
 
 - (NSButton*)settingCheckbox:(NSString*)title setting:(SETTING)setting {
@@ -850,10 +1071,10 @@ static void ResetGrid(NSGridView* grid) {
             [titles addObject:AutoPowerOffName(e)];
             [values addObject:@(e)];
         }
-        [_controlsGrid addRowWithViews:@[GridLabel(@"Turn off automatically:"), [self settingPopup:titles values:values setting:(NSInteger)SETTING::AUTO_POWER_OFF]]];
+        [_controlsGrid addRowWithViews:@[GridLabel(@"Auto power off:"), [self settingPopup:titles values:values setting:(NSInteger)SETTING::AUTO_POWER_OFF]]];
     }
     if (cap.voiceGuidance && g_headphones->getSetting(SETTING::VOICE_GUIDANCE))
-        [_controlsGrid addRowWithViews:@[GridLabel(@"Voice guidance:"), [self settingCheckbox:@"Spoken announcements (power, battery, mode changes)" setting:SETTING::VOICE_GUIDANCE]]];
+        [_controlsGrid addRowWithViews:@[GridLabel(@"Voice guidance:"), [self settingCheckbox:@"Announce power, battery and modes" setting:SETTING::VOICE_GUIDANCE]]];
 
     for (NSGridView* grid in @[_connectionGrid, _controlsGrid]) {
         if (grid.numberOfColumns > 0)
@@ -1047,6 +1268,22 @@ static NSString* AssignableActionsText(unsigned char preset) {
         }
     }
 
+    PlaybackCapability playback = g_headphones->getPlaybackCapability();
+    if (ready && playback.available && playback.transport) {
+        [menu addItem:[NSMenuItem separatorItem]];
+        bool playing = g_headphones->getPlaybackState().status == PLAYBACK_STATUS::PLAYING;
+        NSArray* items = @[
+            @[playing ? @"Pause" : @"Play", NSStringFromSelector(@selector(playPauseClicked:))],
+            @[@"Next Track", NSStringFromSelector(@selector(nextClicked:))],
+            @[@"Previous Track", NSStringFromSelector(@selector(previousClicked:))],
+        ];
+        for (NSArray* entry in items) {
+            NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:@""];
+            item.target = self;
+            [menu addItem:item];
+        }
+    }
+
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem* show = [[NSMenuItem alloc] initWithTitle:@"Show Window" action:@selector(showWindow:) keyEquivalent:@""];
     show.target = self;
@@ -1217,7 +1454,7 @@ static NSString* AssignableActionsText(unsigned char preset) {
             if (g_headphones->getCapabilities() == 0)
                 [strongSelf showMessage:@"The headphones didn't report which features they support. Showing the standard controls; some may not work." isError:YES];
             else if (!complete)
-                [strongSelf showMessage:@"Some settings couldn't be read from the headphones, so they may not match. Use Reload Settings to try again." isError:YES];
+                [strongSelf showMessage:@"Some settings couldn't be read from the headphones, so they may not match. Use the reload button to try again." isError:YES];
             [strongSelf refreshUI];
         });
     });
@@ -1431,6 +1668,8 @@ static NSString* AssignableActionsText(unsigned char preset) {
     _detailLabel.hidden = details.count == 0;
     _statusLabel.stringValue = [self headerStatusText];
     _statusLabel.textColor = _state == ConnectionStateReady ? NSColor.systemGreenColor : NSColor.secondaryLabelColor;
+    // Hidden (not just stopped) so it doesn't take room from the device name.
+    _spinner.hidden = !busy;
     if (busy)
         [_spinner startAnimation:nil];
     else
@@ -1465,6 +1704,9 @@ static NSString* AssignableActionsText(unsigned char preset) {
         caps = DEVICE_CAPABILITIES::NC_ASM | DEVICE_CAPABILITIES::VPT; // device didn't say; offer the basics
 
     _emptyCard.hidden = _state != ConnectionStateDisconnected;
+    _tabBar.hidden = _tabView.hidden = !ready;
+    if (!ready)
+        _nowPlayingCard.hidden = YES;
     _noiseCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::NC_ASM);
     _soundCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::VPT);
     _s2cCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::SPEAK_TO_CHAT);
@@ -1524,6 +1766,7 @@ static NSString* AssignableActionsText(unsigned char preset) {
     _optimizeStatus.stringValue = optimizing ? @"Optimizing… keep the headphones on and stay still."
                                              : @"Tunes noise cancelling to your head shape and air pressure. Takes about 15 seconds.";
 
+    [self refreshNowPlaying:mouseDown];
     [self refreshDevicesList];
     if (!_eqCard.hidden)
         [self refreshEq:s mouseDown:mouseDown];

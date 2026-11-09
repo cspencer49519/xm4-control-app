@@ -31,6 +31,10 @@ public:
 	std::vector<std::string> settingSets; // every settings SET, as hex
 	std::vector<std::string> alertAnswers;
 	bool poweredOff = false;
+	// playback
+	unsigned char playStatus = 2, volume = 30; // paused, 30 of 30
+	std::string track = "Song", album = "Album", artist = "Band", player = "Music";
+	std::vector<std::string> playControls;
 	std::vector<std::string> received;
 	unsigned char vpt = 0, position = 3; // FRONT
 	unsigned char s2c = 1, sens = 2, voice = 1, offTime = 3;
@@ -254,6 +258,21 @@ private:
 			if ((unsigned char)b[1] == 0xd1) touchPanel = b[3]; else gsList = b[3];
 			mdr({(char)0xd9, b[1], b[2], b[3]});
 			break;
+		case 0xa0: mdr({(char)0xa1, 0x01, 31, 0x01, 0x01}); break; // 31 volume steps (0..30), as the real XM4, transport, metadata
+		case 0xa2: mdr({(char)0xa3, 0x01, 0x00, (char)playStatus}); break;
+		case 0xa4:
+			playControls.push_back(hex(b));
+			playStatus = b[3] == 0x07 ? 1 : b[3] == 0x01 ? 2 : playStatus;
+			mdr({(char)0xa5, 0x01, 0x00, (char)playStatus});
+			break;
+		case 0xa6: {
+			unsigned char type = b[2];
+			if (type == 0x20) { mdr({(char)0xa7, 0x01, 0x20, (char)volume}); break; }
+			const std::string& name = type == 0x00 ? track : type == 0x01 ? album : type == 0x02 ? artist : player;
+			mdr(withString({(char)0xa7, 0x01, (char)type, 0x02}, name));
+			break;
+		}
+		case 0xa8: volume = b[3]; mdr({(char)0xa9, 0x01, 0x20, (char)volume}); break;
 		case 0x94: break; // alerts enabled
 		case 0x98: alertAnswers.push_back(hex(b)); break;
 		case 0x22: poweredOff = b.size() == 3 && b[1] == 0x00 && b[2] == 0x01; break;
@@ -465,6 +484,76 @@ int main()
 		hp.powerOff();
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		CHECK(fake->poweredOff);
+	}
+
+	// Playback: capability, status, volume and names
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		PlaybackCapability pc = hp.getPlaybackCapability();
+		CHECK(pc.available && pc.volumeSteps == 31 && pc.transport && pc.metadata);
+		CHECK(hp.getPlaybackState().status == PLAYBACK_STATUS::PAUSED);
+		CHECK(hp.getPlaybackState().volume == 30);
+		// Names are fetched from a background thread after the capability asks for them
+		CHECK(hp.hasStalePlaybackMetadata());
+		hp.refreshPlaybackMetadata();
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		CHECK(!hp.hasStalePlaybackMetadata());
+		PlaybackState ps = hp.getPlaybackState();
+		CHECK(ps.track == "Song" && ps.album == "Album" && ps.artist == "Band" && ps.player == "Music");
+
+		hp.sendPlaybackControl(PLAYBACK_CONTROL::PLAY);
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		CHECK(!fake->playControls.empty() && fake->playControls.back() == "a4 01 00 07 ");
+		CHECK(hp.getPlaybackState().status == PLAYBACK_STATUS::PLAYING);
+		hp.sendPlaybackControl(PLAYBACK_CONTROL::NEXT_TRACK);
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		CHECK(fake->playControls.back() == "a4 01 00 02 ");
+
+		CHECK(!hp.isChanged());
+		hp.setVolume(12);
+		CHECK(hp.isChanged());
+		hp.setChanges();
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		CHECK(fake->volume == 12);
+		CHECK(!hp.isChanged());
+		CHECK(hp.getPlaybackState().volume == 12);
+		hp.setVolume(99); // clamped to the device's step count
+		CHECK(hp.getPlaybackState().volume == 30);
+		// A volume notification (e.g. the Mac's volume keys) doesn't clobber a pending change
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {(char)0xa9, 0x01, 0x20, 0x05}});
+		CHECK(hp.getPlaybackState().volume == 30);
+		hp.setChanges();
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		CHECK(fake->volume == 30);
+		// ...and with nothing pending, it's shown
+		fake->sendRaw(DATA_TYPE::DATA_MDR, {(char)0xa9, 0x01, 0x20, 0x07});
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		CHECK(hp.getPlaybackState().volume == 7);
+		CHECK(!hp.isChanged());
+
+		// Track change: the notification has no name; it is fetched afterwards
+		fake->track = "Next One";
+		fake->sendRaw(DATA_TYPE::DATA_MDR, {(char)0xa9, 0x01, 0x00});
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		CHECK(hp.hasStalePlaybackMetadata());
+		CHECK(hp.getPlaybackState().track == "Song");
+		hp.refreshPlaybackMetadata();
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		CHECK(hp.getPlaybackState().track == "Next One");
+		// Unsettled / empty name clears it
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {(char)0xa7, 0x01, 0x02, 0x01, 0x00}});
+		CHECK(hp.getPlaybackState().artist.empty());
+
+		// Malformed playback packets
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {(char)0xa7, 0x01, 0x00, 0x02, 0x50, 'x'}}); // length past the end
+		CHECK(hp.getPlaybackState().track == "x");
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {(char)0xa1, 0x01}});
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {(char)0xa5}});
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {(char)0xa9, 0x01, 0x20}});
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {(char)0xa5, 0x01, 0x00, 0x7f}});
+		CHECK(hp.getPlaybackState().status == PLAYBACK_STATUS::UNSETTLED);
+		CHECK(hp.getPlaybackState().volume == 7);
+		CHECK(hp.getPlaybackCapability().volumeSteps == 31);
 	}
 
 	// User changes level -> sent -> device echoes -> UI value sticks.

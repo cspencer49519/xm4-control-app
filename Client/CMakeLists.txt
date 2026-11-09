@@ -16,7 +16,8 @@ target_sources(SonyHeadphonesClient
     TimedMessageQueue.cpp
     Listener.cpp
     Headphones.cpp
-    HeadphonesDeviceSettings.cpp)
+    HeadphonesDeviceSettings.cpp
+    HeadphonesPlayback.cpp)
 
 target_include_directories (SonyHeadphonesClient
     PRIVATE ${CMAKE_SOURCE_DIR}

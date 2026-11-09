@@ -186,6 +186,7 @@ bool Headphones::isChanged()
 		this->_dev2.isFulfilled() &&
 		this->_eqPreset.isFulfilled() &&
 		this->_eqBands.isFulfilled() &&
+		this->_volume.isFulfilled() &&
 		!this->_deviceSettingsChanged()
 		);
 }
@@ -330,6 +331,19 @@ void Headphones::setChanges()
 
 	this->_sendDeviceSettingChanges();
 
+	int volume;
+	{
+		std::lock_guard guard(this->_propertyMtx);
+		volume = this->_volume.isFulfilled() ? -1 : this->_volume.desired;
+	}
+	if (volume >= 0)
+	{
+		// PLAY_SET_PARAM [A8, 01 (playback controller), 20 (volume), value]
+		this->_conn.sendCommand({ static_cast<char>(0xa8), 0x01, 0x20, static_cast<char>(volume) });
+		std::lock_guard guard(this->_propertyMtx);
+		this->_volume.markSent(volume);
+	}
+
 	bool vptPending;
 	int vptDesired, vptCurrent;
 	SOUND_POSITION_PRESET positionDesired, positionCurrent;
@@ -425,6 +439,7 @@ void Headphones::resetState()
 		this->_eqPreset.setState(0);
 		this->_eqBands.setState({});
 		this->_resetDeviceSettings();
+		this->_resetPlayback();
 		this->_ambientSoundControl.setState(false);
 		this->_focusOnVoice.setState(false);
 		this->_asmLevel.setState(0);
@@ -491,6 +506,7 @@ bool Headphones::syncState(std::chrono::milliseconds timeout)
 	}
 	// Settings appear in the UI as their values arrive; they don't hold up the sync.
 	this->_queryDeviceSettings();
+	this->_queryPlayback();
 	if (caps & DEVICE_CAPABILITIES::VPT)
 	{
 		this->queryVpt();
@@ -653,7 +669,7 @@ void Headphones::setStateFromReply(BtMessage replyMessage)
 	{
 		if (isPairedDevicesReply)
 			return; // table 1 0x37 is a firmware-update reply, not the device list
-		if (this->_handleDeviceSettingsReply(bytes))
+		if (this->_handleDeviceSettingsReply(bytes) || this->_handlePlaybackReply(bytes))
 		{
 			this->_notifyStateChanged();
 			return;

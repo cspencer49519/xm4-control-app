@@ -165,6 +165,40 @@ struct DeviceSettingsCapability
 	bool assignableEnabled = true;
 };
 
+// Playback controller (PLAY 0xA0-0xA9). The headphones relay the playing source.
+enum class PLAYBACK_STATUS : unsigned char
+{
+	UNSETTLED = 0x00,
+	PLAYING = 0x01,
+	PAUSED = 0x02,
+	STOPPED = 0x03,
+};
+
+// PlaybackControl values for PLAY_SET_STATUS. There is no toggle; send PLAY or PAUSE.
+enum class PLAYBACK_CONTROL : unsigned char
+{
+	PAUSE = 0x01,
+	NEXT_TRACK = 0x02,
+	PREVIOUS_TRACK = 0x03,
+	STOP = 0x06,
+	PLAY = 0x07,
+};
+
+struct PlaybackCapability
+{
+	bool available = false;     // the device answered PLAY_GET_CAPABILITY
+	int volumeSteps = 0;        // number of levels: volume is 0..volumeSteps-1 (XM4: 31); 0 = no volume control
+	bool transport = false;     // play/pause/next/previous
+	bool metadata = false;      // track/album/artist/player names
+};
+
+struct PlaybackState
+{
+	PLAYBACK_STATUS status = PLAYBACK_STATUS::UNSETTLED;
+	int volume = -1;            // -1 = unknown
+	std::string track, album, artist, player;
+};
+
 class Headphones {
 public:
 	Headphones(BluetoothWrapper& conn);
@@ -241,6 +275,19 @@ public:
 	void queryS2C();
 	void queryS2COptions();
 
+	// --- Playback (HeadphonesPlayback.cpp) ---
+	PlaybackCapability getPlaybackCapability();
+	// Volume is the pending value while a change is being sent.
+	PlaybackState getPlaybackState();
+	// Sent by setChanges(); ignored until the device has reported its volume.
+	void setVolume(int volume);
+	// Sends immediately; call from a background thread.
+	void sendPlaybackControl(PLAYBACK_CONTROL control);
+	// True when the device said a track/player name changed. Names can't be fetched on
+	// the listener thread, so call refreshPlaybackMetadata() from a background thread.
+	bool hasStalePlaybackMetadata();
+	void refreshPlaybackMetadata();
+
 	// Forget everything known about the device (call before connecting).
 	void resetState();
 	// Blocking: query capabilities, then the state of every supported feature,
@@ -271,6 +318,14 @@ private:
 	bool _handleDeviceSettingsReply(const Buffer& bytes);
 	void _handleTable2Reply(const Buffer& bytes);
 	void _notifyStateChanged();
+	void _queryPlayback();
+	void _resetPlayback();           // caller holds _propertyMtx
+	bool _handlePlaybackReply(const Buffer& bytes);
+
+	PlaybackCapability _playbackCapability;
+	PlaybackState _playbackState;    // volume lives in _volume
+	Property<int> _volume = { -1, -1 };
+	std::vector<unsigned char> _stalePlaybackNames; // PlaybackDetailedDataType values to re-query
 
 	std::atomic<unsigned int> _capabilities = 0;
 	unsigned int _loadedState = 0;
