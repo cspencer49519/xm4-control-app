@@ -539,3 +539,10 @@ build-linux/
 
 # opencode
 .opencode/
+
+# local Xcode signing settings (see Client/macos/Signing.xcconfig)
+Client/macos/Local.xcconfig
+
+# macOS / Xcode per-user files
+.DS_Store
+xcuserdata/

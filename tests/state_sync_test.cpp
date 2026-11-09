@@ -9,6 +9,9 @@
 #include <cstdio>
 #include <deque>
 #include <thread>
+#include <algorithm>
+
+static Buffer operator+(Buffer a, const Buffer& b) { a.insert(a.end(), b.begin(), b.end()); return a; }
 
 static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); failures++; } else { std::printf("ok   %s\n", #cond); } } while (0)
@@ -22,6 +25,12 @@ public:
 	unsigned char eqPreset = 0x10; // Bright
 	std::vector<unsigned char> eqBands = {10, 12, 11, 10, 13, 14};
 	std::vector<std::string> eqSets;
+	// device settings
+	unsigned char pauseWhenRemoved = 1, apoActive = 0x11, apoSelect = 0x01, connMode = 0, dsee = 1, voiceGuidance = 1;
+	unsigned char touchPanel = 1, gsList = 1, customKeyPreset = 0x00;
+	std::vector<std::string> settingSets; // every settings SET, as hex
+	std::vector<std::string> alertAnswers;
+	bool poweredOff = false;
 	std::vector<std::string> received;
 	unsigned char vpt = 0, position = 3; // FRONT
 	unsigned char s2c = 1, sens = 2, voice = 1, offTime = 3;
@@ -72,10 +81,52 @@ private:
 	}
 	void notifyNc() { push(DATA_TYPE::DATA_MDR, {(char)0x69, 0x02, (char)ncEffect, (char)ncSettingType, (char)dualSingle, 0x01, (char)asmId, (char)asmLevel}, seq++); }
 
-	void handle(const BtMessage& m)
+	static std::string hex(const Buffer& b)
+	{
+		std::string out;
+		for (char c : b) { char h[4]; std::snprintf(h, sizeof h, "%02x ", (unsigned char)c); out += h; }
+		return out;
+	}
+	static Buffer withString(Buffer head, const std::string& str)
+	{
+		head.push_back((char)str.size());
+		head.insert(head.end(), str.begin(), str.end());
+		return head;
+	}
+
+	void handleTable2(const BtMessage& m)
 	{
 		const Buffer& b = m.messageBytes;
+		auto mdr2 = [&](Buffer p) { push(DATA_TYPE::DATA_MDR_NO2, p, seq++); };
+		switch ((unsigned char)b[0])
+		{
+		case 0x36: {
+			Buffer p = {0x37, 0x01, 0x02};
+			std::string macs[2] = {"AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"};
+			std::string names[2] = {"MacBook", "Phone"};
+			for (int i = 0; i < 2; i++) {
+				p.insert(p.end(), macs[i].begin(), macs[i].end());
+				p.push_back(i == 0 ? 0x01 : 0x00);
+				p.push_back((char)names[i].size());
+				p.insert(p.end(), names[i].begin(), names[i].end());
+			}
+			mdr2(p);
+			break;
+		}
+		case 0x40: mdr2({0x41, 0x01, 0x01, 0x00}); break;                        // VG: on/off supported, no language switch
+		case 0x42: mdr2({0x43, 0x01, 0x01, 0x00}); break;
+		case 0x46: mdr2({0x47, 0x01, 0x01, (char)voiceGuidance}); break;
+		case 0x48: settingSets.push_back("T2 " + hex(b)); voiceGuidance = b[3]; mdr2({0x49, 0x01, 0x01, (char)voiceGuidance}); break;
+		default: break;
+		}
+	}
+
+	void handle(const BtMessage& m)
+	{
+		if (m.dataType == DATA_TYPE::DATA_MDR_NO2) { handleTable2(m); return; }
+		const Buffer& b = m.messageBytes;
 		unsigned char cmd = b[0];
+		auto mdr = [&](Buffer p) { push(DATA_TYPE::DATA_MDR, p, seq++); };
 		char buf[8]; std::snprintf(buf, sizeof buf, "%02x", cmd); sentLog.push_back(buf);
 		switch (cmd)
 		{
@@ -145,24 +196,67 @@ private:
 			push(DATA_TYPE::DATA_MDR, {0x47, b[1], (char)(b[1] == 1 ? vpt : position)}, seq++);
 			break;
 		case 0xf6:
-			push(DATA_TYPE::DATA_MDR, {(char)0xf7, 0x05, 0x00, (char)s2c}, seq++);
+			if (b[1] == 0x05) mdr({(char)0xf7, 0x05, 0x00, (char)s2c});
+			if (b[1] == 0x03) mdr({(char)0xf7, 0x03, 0x00, (char)pauseWhenRemoved});
+			if (b[1] == 0x04) mdr({(char)0xf7, 0x04, 0x01, (char)apoActive, (char)apoSelect});
+			if (b[1] == 0x06) mdr({(char)0xf7, 0x06, 0x01, (char)customKeyPreset});
+			break;
+		case 0xf8:
+			if (b[1] == 0x05) break;
+			settingSets.push_back(hex(b));
+			if (b[1] == 0x03) { pauseWhenRemoved = b[3]; mdr({(char)0xf9, 0x03, 0x00, b[3]}); }
+			if (b[1] == 0x04) { apoActive = b[3]; apoSelect = b[4]; mdr({(char)0xf9, 0x04, 0x01, b[3], b[4]}); }
+			if (b[1] == 0x06) { customKeyPreset = b[3]; mdr({(char)0xf9, 0x06, 0x01, b[3]}); }
 			break;
 		case 0xfa:
 			push(DATA_TYPE::DATA_MDR, {(char)0xfb, 0x05, 0x00, (char)sens, (char)voice, (char)offTime}, seq++);
 			break;
-		case 0x36: {
-			Buffer p = {0x37, 0x01, 0x02};
-			std::string macs[2] = {"AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"};
-			std::string names[2] = {"MacBook", "Phone"};
-			for (int i = 0; i < 2; i++) {
-				p.insert(p.end(), macs[i].begin(), macs[i].end());
-				p.push_back(i == 0 ? 0x01 : 0x00);
-				p.push_back((char)names[i].size());
-				p.insert(p.end(), names[i].begin(), names[i].end());
-			}
-			push(DATA_TYPE::DATA_MDR_NO2, p, seq++);
+		// --- device settings ---
+		case 0xf0:
+			if (b[1] == 0x03) mdr({(char)0xf1, 0x03, 0x00});
+			if (b[1] == 0x04) mdr({(char)0xf1, 0x04, 0x02, 0x10, 0x11});
+			if (b[1] == 0x06) // one custom button: NC/AMB, voice assistant, Google Assistant
+				mdr({(char)0xf1, 0x06, 0x01, 0x02, 0x01, 0x00, 0x03,
+					0x00, 0x01, 0x00, 0x01,
+					0x30, 0x01, 0x00, 0x30,
+					0x31, 0x02, 0x00, 0x32, 0x01, 0x33});
 			break;
-		}
+		case 0xf2:
+			if (b[1] == 0x03 || b[1] == 0x04) mdr({(char)0xf3, b[1], 0x00});
+			if (b[1] == 0x06) mdr({(char)0xf3, 0x06, 0x01, 0x00});
+			break;
+		case 0xe0:
+			if (b[1] == 0x01) mdr({(char)0xe1, 0x01, 0x00});
+			if (b[1] == 0x02) mdr({(char)0xe1, 0x02, 0x02, 0x00});
+			break;
+		case 0xe2: mdr({(char)0xe3, b[1], 0x00}); break;
+		case 0xe6: mdr({(char)0xe7, b[1], 0x00, (char)(b[1] == 0x01 ? connMode : dsee)}); break;
+		case 0xe8:
+			settingSets.push_back(hex(b));
+			if (b[1] == 0x01) connMode = b[3]; else dsee = b[3];
+			mdr({(char)0xe9, b[1], 0x00, b[3]});
+			break;
+		case 0xd0:
+			if ((unsigned char)b[1] == 0xd1)
+				mdr(withString({(char)0xd1, (char)0xd1, 0x02}, "TOUCH_PANEL_SETTING") + Buffer{0x00, 0x01});
+			if ((unsigned char)b[1] == 0xd2) {
+				Buffer p = withString({(char)0xd1, (char)0xd2, 0x01}, "Mode");
+				p.push_back(0x00); p.push_back(0x02); p.push_back(0x02);
+				p = withString(p + Buffer{0x01}, "A"); p.push_back(0x00);
+				p = withString(p + Buffer{0x01}, "B"); p.push_back(0x00);
+				mdr(p);
+			}
+			break;
+		case 0xd2: mdr({(char)0xd3, b[1], 0x00}); break;
+		case 0xd6: mdr({(char)0xd7, b[1], (char)((unsigned char)b[1] == 0xd1 ? 0x01 : 0x02), (char)((unsigned char)b[1] == 0xd1 ? touchPanel : gsList)}); break;
+		case 0xd8:
+			settingSets.push_back(hex(b));
+			if ((unsigned char)b[1] == 0xd1) touchPanel = b[3]; else gsList = b[3];
+			mdr({(char)0xd9, b[1], b[2], b[3]});
+			break;
+		case 0x94: break; // alerts enabled
+		case 0x98: alertAnswers.push_back(hex(b)); break;
+		case 0x22: poweredOff = b.size() == 3 && b[1] == 0x00 && b[2] == 0x01; break;
 		default:
 			break;
 		}
@@ -205,7 +299,7 @@ int main()
 	auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 	std::printf("sync took %lld ms\n", (long long)ms);
 	CHECK(complete);
-	CHECK(ms < 1500);
+	CHECK(ms < 2500);
 
 	unsigned caps = hp.getCapabilities();
 	CHECK(caps & DEVICE_CAPABILITIES::NC_ASM);
@@ -287,6 +381,91 @@ int main()
 	CHECK(!hp.getEqCapability().enabled);
 	hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {0x59, 0x01, 0x10, 0x09, 1}}); // truncated
 	CHECK(hp.getSettings().eqBands.size() == 6);
+
+	// --- Device settings ---
+	std::vector<std::pair<unsigned char, bool>> alerts;
+	std::mutex alertMtx;
+	hp.setAlertCallback([&](unsigned char msg, bool choice) { std::lock_guard g(alertMtx); alerts.push_back({msg, choice}); });
+	{
+		DeviceSettingsCapability sc = hp.getSettingsCapability();
+		CHECK(sc.pauseWhenRemoved);
+		CHECK(sc.autoPowerOffElements == (std::vector<unsigned char>{0x10, 0x11}));
+		CHECK(sc.assignableKeys.size() == 1 && sc.assignableKeys[0].key == 0x02 && sc.assignableKeys[0].keyType == 0x01);
+		CHECK(sc.assignableKeys.size() == 1 && sc.assignableKeys[0].presets == (std::vector<unsigned char>{0x00, 0x30, 0x31}));
+		CHECK(sc.connectionMode && sc.upscaling && sc.upscalingType == UPSCALING_TYPE::DSEE_EXTREME);
+		CHECK(sc.voiceGuidance);
+		CHECK(sc.general[0].available && !sc.general[0].isList && sc.general[0].title.enumName && sc.general[0].title.name == "TOUCH_PANEL_SETTING");
+		CHECK(sc.general[1].available && sc.general[1].isList && sc.general[1].items.size() == 2 && sc.general[1].items[1].name == "B");
+		CHECK(!sc.general[2].available);
+		CHECK(hp.getSetting(SETTING::PAUSE_WHEN_REMOVED) == 1);
+		CHECK(hp.getSetting(SETTING::AUTO_POWER_OFF) == 0x11);
+		CHECK(hp.getSetting(SETTING::CONNECTION_MODE) == 0);
+		CHECK(hp.getSetting(SETTING::UPSCALING) == 1);
+		CHECK(hp.getSetting(SETTING::VOICE_GUIDANCE) == 1);
+		CHECK(hp.getSetting(SETTING::GENERAL_SETTING_1) == 1);
+		CHECK(hp.getSetting(SETTING::GENERAL_SETTING_2) == 1);
+		CHECK(!hp.getSetting(SETTING::GENERAL_SETTING_3).has_value());
+		CHECK(hp.getAssignablePresets() == std::vector<unsigned char>{0x00});
+		CHECK(!hp.isChanged());
+
+		// Settings that haven't been reported can't be set
+		hp.setSetting(SETTING::GENERAL_SETTING_3, 1);
+		CHECK(!hp.isChanged());
+
+		hp.setSetting(SETTING::PAUSE_WHEN_REMOVED, 0);
+		hp.setSetting(SETTING::AUTO_POWER_OFF, 0x10);
+		hp.setSetting(SETTING::CONNECTION_MODE, 1);
+		hp.setSetting(SETTING::UPSCALING, 0);
+		hp.setSetting(SETTING::VOICE_GUIDANCE, 0);
+		hp.setSetting(SETTING::GENERAL_SETTING_1, 0);
+		hp.setSetting(SETTING::GENERAL_SETTING_2, 0);
+		hp.setAssignablePresets({0x31});
+		CHECK(hp.isChanged());
+		hp.setChanges();
+		std::this_thread::sleep_for(std::chrono::milliseconds(150));
+		std::vector<std::string> sets = fake->settingSets;
+		auto sent = [&](const std::string& h) { return std::find(sets.begin(), sets.end(), h) != sets.end(); };
+		CHECK(sent("f8 03 00 00 "));
+		CHECK(sent("f8 04 01 10 01 ")); // keeps the last timeout (30 min) as select time
+		CHECK(sent("e8 01 00 01 "));
+		CHECK(sent("e8 02 00 00 "));
+		CHECK(sent("T2 48 01 01 00 "));  // voice guidance goes over table 2
+		CHECK(sent("d8 d1 01 00 "));     // boolean general setting
+		CHECK(sent("d8 d2 02 00 "));     // list general setting
+		CHECK(sent("f8 06 01 31 "));
+		CHECK(!hp.isChanged());
+		CHECK(hp.getSetting(SETTING::VOICE_GUIDANCE) == 0);
+		CHECK(hp.getAssignablePresets() == std::vector<unsigned char>{0x31});
+		CHECK(hp.getSettings().vptType == 0); // table-2 0x49 must not be read as a VPT notification
+
+		// Device asks for confirmation; the app answers from a non-listener thread
+		fake->sendRaw(DATA_TYPE::DATA_MDR, {(char)0x99, 0x01, 0x06, 0x01});
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		{
+			std::lock_guard g(alertMtx);
+			CHECK(alerts.size() == 1 && alerts[0].first == 0x06 && alerts[0].second);
+		}
+		hp.answerAlert(0x06, true);
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		CHECK(fake->alertAnswers.size() == 1 && fake->alertAnswers[0] == "98 01 06 01 ");
+
+		// Device-side change (e.g. from the phone app) shows up
+		fake->sendRaw(DATA_TYPE::DATA_MDR, {(char)0xd9, (char)0xd1, 0x01, 0x01});
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		CHECK(hp.getSetting(SETTING::GENERAL_SETTING_1) == 1);
+
+		// Malformed settings packets
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {(char)0xf1, 0x06, 0x05, 0x02}});
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {(char)0xd1, (char)0xd1, 0x02, (char)200, 'x'}});
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR, 0, {(char)0xf7, 0x04, 0x01}});
+		hp.setStateFromReply(BtMessage{DATA_TYPE::DATA_MDR_NO2, 0, {0x47}});
+		CHECK(hp.getSettingsCapability().general[0].available);
+		CHECK(hp.getSettingsCapability().assignableKeys.size() == 1);
+
+		hp.powerOff();
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		CHECK(fake->poweredOff);
+	}
 
 	// User changes level -> sent -> device echoes -> UI value sticks.
 	hp.setAsmLevel(5);

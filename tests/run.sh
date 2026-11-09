@@ -2,7 +2,7 @@
 # Build and run the protocol tests under AddressSanitizer/UBSan and ThreadSanitizer.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-SRC="Client/Headphones.cpp Client/Listener.cpp Client/BluetoothWrapper.cpp Client/CommandSerializer.cpp Client/ByteMagic.cpp"
+SRC="Client/Headphones.cpp Client/HeadphonesDeviceSettings.cpp Client/Listener.cpp Client/BluetoothWrapper.cpp Client/CommandSerializer.cpp Client/ByteMagic.cpp"
 OUT=$(mktemp -d)
 status=0
 for san in address,undefined thread; do

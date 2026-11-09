@@ -94,6 +94,82 @@ static NSString* EqPresetName(const EqPreset& preset) {
     return preset.name.empty() ? [NSString stringWithFormat:@"Preset %02X", preset.id] : @(preset.name.c_str());
 }
 
+// --- Device settings text ---
+
+// Display names for GENERAL_SETTING keys the device sends as symbolic names.
+static NSString* GeneralSettingText(const GeneralSettingItem& item) {
+    if (!item.enumName)
+        return @(item.name.c_str());
+    static NSDictionary<NSString*, NSString*>* names = @{
+        @"TOUCH_PANEL_SETTING": @"Touch sensor control panel",
+        @"MULTIPOINT_SETTING": @"Connect to 2 devices simultaneously",
+        @"MULTIPOINT_SETTING_SUMMARY": @"Stay connected to two devices, such as this Mac and your phone, and switch between them.",
+        @"SIDETONE_SETTING": @"Hear your own voice during calls",
+        @"VOICE_GUIDANCE_SETTING": @"Voice guidance",
+        @"TAP_SENSITIVITY_SETTING": @"Tap sensitivity",
+        @"FACETAP_SETTING": @"Face tap",
+    };
+    NSString* key = @(item.name.c_str());
+    if (names[key])
+        return names[key];
+    // Unknown key: "SOME_NEW_SETTING" -> "Some new setting"
+    NSString* text = [[key stringByReplacingOccurrencesOfString:@"_" withString:@" "] lowercaseString];
+    if ([text hasSuffix:@" setting"])
+        text = [text substringToIndex:text.length - 8];
+    return text.length ? [[[text substringToIndex:1] uppercaseString] stringByAppendingString:[text substringFromIndex:1]] : key;
+}
+
+static NSString* AssignablePresetName(unsigned char preset) {
+    switch (preset) {
+        case ASSIGNABLE_AMBIENT_SOUND_CONTROL: return @"Ambient Sound Control";
+        case ASSIGNABLE_VOLUME_CONTROL: return @"Volume control";
+        case ASSIGNABLE_PLAYBACK_CONTROL: return @"Playback control";
+        case ASSIGNABLE_VOICE_RECOGNITION: return @"Voice assistant (Siri)";
+        case ASSIGNABLE_GOOGLE_ASSISTANT: return @"Google Assistant";
+        case ASSIGNABLE_AMAZON_ALEXA: return @"Amazon Alexa";
+        case ASSIGNABLE_TENCENT_XIAOWEI: return @"Tencent Xiaowei";
+        case ASSIGNABLE_NO_FUNCTION: return @"No function";
+    }
+    return [NSString stringWithFormat:@"Function %02X", preset];
+}
+
+static NSString* AssignableKeyName(const AssignableKey& key) {
+    switch (key.key) {
+        case 0x00: return @"Left touch sensor";
+        case 0x01: return @"Right touch sensor";
+        case 0x02: return @"Custom button";
+        case 0x03: return @"C button";
+    }
+    return @"Button";
+}
+
+static NSString* AutoPowerOffName(int element) {
+    switch (element) {
+        case AUTO_POWER_OFF_5_MIN: return @"After 5 minutes";
+        case AUTO_POWER_OFF_30_MIN: return @"After 30 minutes";
+        case AUTO_POWER_OFF_60_MIN: return @"After 1 hour";
+        case AUTO_POWER_OFF_180_MIN: return @"After 3 hours";
+        case AUTO_POWER_OFF_WHEN_REMOVED: return @"When taken off";
+        case AUTO_POWER_OFF_DISABLED: return @"Never";
+    }
+    return [NSString stringWithFormat:@"Option %02X", element];
+}
+
+// Text for the device's confirmation alerts (AlertMessageType).
+static NSString* AlertText(unsigned char message) {
+    switch (message) {
+        case 0x01: return @"Changing this setting reconnects the headphones. Playback stops briefly.";
+        case 0x02: return @"Changing the button function reconnects the headphones.";
+        case 0x03: return @"The headphones need to disconnect to update their firmware.";
+        case 0x04: return @"Google Assistant is now available on the headphones.";
+        case 0x05: return @"Only one voice assistant can be assigned at a time.";
+        case 0x06: return @"Turning on multipoint reconnects the headphones.";
+        case 0x07: return @"Turning off multipoint disconnects the headphones from the other device.";
+        case 0x08: return @"Using the equalizer together with DSEE increases battery use.";
+    }
+    return [NSString stringWithFormat:@"The headphones are asking for confirmation (message %02X).", message];
+}
+
 static NSString* EqValueText(int value) {
     return value == 0 ? @"0" : [NSString stringWithFormat:@"%+d", value];
 }
@@ -146,6 +222,16 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
     NSView* _optimizerCard;
     NSView* _devicesCard;
     NSView* _eqCard;
+    NSView* _connectionCard;
+    NSView* _controlsCard;
+    NSGridView* _connectionGrid;
+    NSGridView* _controlsGrid;
+    NSString* _settingsSignature;
+    // control -> what it edits: tag = SETTING value, or 100 + key index for custom buttons
+    NSMutableArray<NSControl*>* _settingControls;
+    NSMutableDictionary<NSNumber*, NSTextField*>* _assignableHints;
+    BOOL _alertShowing;
+    NSButton* _powerOffButton;
 
     // Equalizer (rebuilt when the device's EQ description changes)
     NSPopUpButton* _eqPresetPopup;
@@ -201,6 +287,11 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
     _lastAmbientLevel = DEFAULT_AMBIENT_STEPS + 1;
 
     __weak ViewController* weakSelf = self;
+    g_headphones->setAlertCallback([weakSelf](unsigned char message, bool needsChoice) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf showDeviceAlert:message needsChoice:needsChoice];
+        });
+    });
     g_headphones->setStateChangedCallback([weakSelf]() {
         dispatch_async(dispatch_get_main_queue(), ^{
             [weakSelf deviceStateChanged];
@@ -276,7 +367,7 @@ static NSPopUpButton* MakePopup(NSArray<NSString*>* items, id target, SEL action
     popup.target = target;
     popup.action = action;
     popup.translatesAutoresizingMaskIntoConstraints = NO;
-    [popup.widthAnchor constraintEqualToConstant:180].active = YES;
+    [popup.widthAnchor constraintGreaterThanOrEqualToConstant:180].active = YES;
     return popup;
 }
 
@@ -320,7 +411,9 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
     grid.rowSpacing = 10;
     grid.columnSpacing = 10;
     grid.translatesAutoresizingMaskIntoConstraints = NO;
-    [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
+    // (an empty grid has no columns yet; rebuildSettingsCards sets placement after adding rows)
+    if (grid.numberOfColumns > 0)
+        [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
     // keep the grid at its natural width so it sits at the leading edge of the card
     [grid setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     for (NSInteger i = 0; i < grid.numberOfRows; i++)
@@ -363,11 +456,22 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
     _s2cCard = [self buildSpeakToChatCard];
     _optimizerCard = [self buildOptimizerCard];
     _eqCard = [self buildEqCard];
+    _connectionGrid = MakeFormGrid(@[]);
+    _controlsGrid = MakeFormGrid(@[]);
+    _connectionCard = [self cardWithTitle:@"Sound & Connection" symbol:@"antenna.radiowaves.left.and.right" body:_connectionGrid];
+    NSButton* powerOff = [NSButton buttonWithTitle:@"Power Off Headphones" target:self action:@selector(powerOffClicked:)];
+    powerOff.image = [NSImage imageWithSystemSymbolName:@"power" accessibilityDescription:nil];
+    powerOff.imagePosition = NSImageLeading;
+    _powerOffButton = powerOff;
+    NSStackView* controlsBody = MakeStack(NSUserInterfaceLayoutOrientationVertical, 14, @[_controlsGrid, powerOff]);
+    _controlsCard = [self cardWithTitle:@"Controls & Power" symbol:@"hand.tap" body:controlsBody];
+    _settingControls = [NSMutableArray array];
+    _assignableHints = [NSMutableDictionary dictionary];
     _devicesCard = [self buildDevicesCard];
     NSTextField* footer = MakeLabel(@"Unofficial client. Settings stay in sync with the headphones.",
                                     [NSFont systemFontOfSize:11], NSColor.tertiaryLabelColor);
 
-    NSArray<NSView*>* cards = @[header, _emptyCard, _noiseCard, _eqCard, _soundCard, _s2cCard, _optimizerCard, _devicesCard];
+    NSArray<NSView*>* cards = @[header, _emptyCard, _noiseCard, _eqCard, _soundCard, _s2cCard, _connectionCard, _controlsCard, _optimizerCard, _devicesCard];
     NSStackView* column = MakeStack(NSUserInterfaceLayoutOrientationVertical, 14, [cards arrayByAddingObject:footer]);
     column.alignment = NSLayoutAttributeCenterX;
     column.edgeInsets = NSEdgeInsetsMake(18, 18, 18, 18);
@@ -639,6 +743,253 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
         slider.enabled = enabled;
     _eqHint.stringValue = enabled ? @"" : @"The headphones have the equalizer turned off right now.";
     _eqHint.hidden = enabled;
+}
+
+#pragma mark - Device settings
+
+static NSTextField* GridLabel(NSString* text) {
+    return MakeLabel(text, [NSFont systemFontOfSize:13], NSColor.labelColor);
+}
+
+- (NSButton*)settingCheckbox:(NSString*)title setting:(SETTING)setting {
+    NSButton* box = [NSButton checkboxWithTitle:title target:self action:@selector(settingControlChanged:)];
+    box.tag = (NSInteger)setting;
+    [_settingControls addObject:box];
+    return box;
+}
+
+- (NSPopUpButton*)settingPopup:(NSArray<NSString*>*)titles values:(NSArray<NSNumber*>*)values setting:(NSInteger)tag {
+    NSPopUpButton* popup = MakePopup(@[], self, @selector(settingControlChanged:));
+    for (NSUInteger i = 0; i < titles.count; i++) {
+        [popup addItemWithTitle:titles[i]];
+        popup.lastItem.tag = values[i].integerValue;
+    }
+    popup.tag = tag;
+    [_settingControls addObject:popup];
+    return popup;
+}
+
+static NSView* WithHint(NSView* control, NSString* hint, NSTextField** hintOut) {
+    NSTextField* label = MakeLabel(hint ?: @"", [NSFont systemFontOfSize:11], NSColor.secondaryLabelColor);
+    label.maximumNumberOfLines = 3;
+    label.lineBreakMode = NSLineBreakByWordWrapping;
+    label.preferredMaxLayoutWidth = 250;
+    label.hidden = hint.length == 0;
+    if (hintOut) *hintOut = label;
+    return MakeStack(NSUserInterfaceLayoutOrientationVertical, 3, @[control, label]);
+}
+
+static void ResetGrid(NSGridView* grid) {
+    while (grid.numberOfRows > 0)
+        [grid removeRowAtIndex:0];
+}
+
+// Rebuild both settings cards for the settings the device reported.
+- (void)rebuildSettingsCards:(const DeviceSettingsCapability&)cap {
+    ResetGrid(_connectionGrid);
+    ResetGrid(_controlsGrid);
+    [_settingControls removeAllObjects];
+    [_assignableHints removeAllObjects];
+
+    // Sound & Connection
+    if (cap.connectionMode && g_headphones->getSetting(SETTING::CONNECTION_MODE)) {
+        NSPopUpButton* p = [self settingPopup:@[@"Priority on sound quality", @"Priority on stable connection"] values:@[@0, @1] setting:(NSInteger)SETTING::CONNECTION_MODE];
+        [_connectionGrid addRowWithViews:@[GridLabel(@"Bluetooth:"), WithHint(p, @"Changing this reconnects the headphones.", nil)]];
+    }
+    if (cap.upscaling && g_headphones->getSetting(SETTING::UPSCALING)) {
+        NSString* title = [UpscalingName(cap.upscalingType) stringByAppendingString:@" (upscale compressed music)"];
+        [_connectionGrid addRowWithViews:@[GridLabel(@"Upscaling:"), [self settingCheckbox:title setting:SETTING::UPSCALING]]];
+    }
+    // Device-described settings (touch panel, multipoint, ...)
+    for (int i = 0; i < 3; i++) {
+        const GeneralSettingCapability& gs = cap.general[i];
+        SETTING setting = (SETTING)((int)SETTING::GENERAL_SETTING_1 + i);
+        if (!gs.available || !g_headphones->getSetting(setting))
+            continue;
+        NSString* title = GeneralSettingText(gs.title);
+        NSString* summary = gs.title.description.empty() ? nil
+            : GeneralSettingText(GeneralSettingItem{ gs.title.enumName, gs.title.description, "" });
+        BOOL isMultipoint = gs.title.enumName && gs.title.name == "MULTIPOINT_SETTING";
+        NSGridView* grid = isMultipoint ? _connectionGrid : _controlsGrid;
+        if (gs.isList) {
+            NSMutableArray* titles = [NSMutableArray array];
+            NSMutableArray* values = [NSMutableArray array];
+            for (size_t k = 0; k < gs.items.size(); k++) {
+                [titles addObject:GeneralSettingText(gs.items[k])];
+                [values addObject:@(k)];
+            }
+            NSPopUpButton* p = [self settingPopup:titles values:values setting:(NSInteger)setting];
+            [grid addRowWithViews:@[GridLabel([title stringByAppendingString:@":"]), WithHint(p, summary, nil)]];
+        } else {
+            NSButton* box = [self settingCheckbox:isMultipoint ? @"Connect to 2 devices at once" : title setting:setting];
+            [grid addRowWithViews:@[GridLabel(isMultipoint ? @"Multipoint:" : @""), WithHint(box, summary, nil)]];
+        }
+    }
+
+    // Controls & Power
+    for (size_t k = 0; k < cap.assignableKeys.size(); k++) {
+        const AssignableKey& key = cap.assignableKeys[k];
+        NSMutableArray* titles = [NSMutableArray array];
+        NSMutableArray* values = [NSMutableArray array];
+        for (unsigned char preset : key.presets) {
+            [titles addObject:AssignablePresetName(preset)];
+            [values addObject:@(preset)];
+        }
+        NSPopUpButton* p = [self settingPopup:titles values:values setting:100 + (NSInteger)k];
+        NSTextField* hint = nil;
+        NSView* v = WithHint(p, nil, &hint);
+        _assignableHints[@(k)] = hint;
+        [_controlsGrid addRowWithViews:@[GridLabel([AssignableKeyName(key) stringByAppendingString:@":"]), v]];
+    }
+    if (cap.pauseWhenRemoved && g_headphones->getSetting(SETTING::PAUSE_WHEN_REMOVED))
+        [_controlsGrid addRowWithViews:@[GridLabel(@"Wearing:"), [self settingCheckbox:@"Pause music when taken off" setting:SETTING::PAUSE_WHEN_REMOVED]]];
+    if (!cap.autoPowerOffElements.empty() && g_headphones->getSetting(SETTING::AUTO_POWER_OFF)) {
+        NSMutableArray* titles = [NSMutableArray array];
+        NSMutableArray* values = [NSMutableArray array];
+        for (unsigned char e : cap.autoPowerOffElements) {
+            [titles addObject:AutoPowerOffName(e)];
+            [values addObject:@(e)];
+        }
+        [_controlsGrid addRowWithViews:@[GridLabel(@"Turn off automatically:"), [self settingPopup:titles values:values setting:(NSInteger)SETTING::AUTO_POWER_OFF]]];
+    }
+    if (cap.voiceGuidance && g_headphones->getSetting(SETTING::VOICE_GUIDANCE))
+        [_controlsGrid addRowWithViews:@[GridLabel(@"Voice guidance:"), [self settingCheckbox:@"Spoken announcements (power, battery, mode changes)" setting:SETTING::VOICE_GUIDANCE]]];
+
+    for (NSGridView* grid in @[_connectionGrid, _controlsGrid]) {
+        if (grid.numberOfColumns > 0)
+            [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
+        for (NSInteger r = 0; r < grid.numberOfRows; r++)
+            [grid rowAtIndex:r].yPlacement = NSGridCellPlacementTop;
+    }
+}
+
+// What the custom button does with each function. Written from the action lists a
+// WH-1000XM4 reports in its ASSIGNABLE_SETTINGS capability (docs/PROTOCOL.md).
+static NSString* AssignableActionsText(unsigned char preset) {
+    switch (preset) {
+        case ASSIGNABLE_AMBIENT_SOUND_CONTROL: return @"Press: cycle noise cancelling / ambient sound / off. Hold: NC Optimizer.";
+        case ASSIGNABLE_GOOGLE_ASSISTANT: return @"Press: hear notifications. Hold: talk to Google Assistant. Double-press: stop.";
+        case ASSIGNABLE_AMAZON_ALEXA: return @"Press: talk to Alexa.";
+        case ASSIGNABLE_VOICE_RECOGNITION: return @"Press: start your device's voice assistant.";
+    }
+    return nil;
+}
+
+- (void)refreshSettingsCards {
+    DeviceSettingsCapability cap = g_headphones->getSettingsCapability();
+
+    // Layout changes when features or reported values appear.
+    NSMutableString* signature = [NSMutableString stringWithFormat:@"%d%d%d%d%d|%zu|%zu", cap.connectionMode, cap.upscaling,
+        cap.pauseWhenRemoved, cap.voiceGuidance, (int)cap.upscalingType, cap.autoPowerOffElements.size(), cap.assignableKeys.size()];
+    for (int s = 0; s <= (int)SETTING::GENERAL_SETTING_3; s++)
+        [signature appendFormat:@"%d", g_headphones->getSetting((SETTING)s).has_value()];
+    for (int i = 0; i < 3; i++)
+        [signature appendFormat:@"|%d%s%zu", cap.general[i].available, cap.general[i].title.name.c_str(), cap.general[i].items.size()];
+    for (const auto& key : cap.assignableKeys)
+        for (unsigned char p : key.presets) [signature appendFormat:@",%d", p];
+    if (![signature isEqualToString:_settingsSignature]) {
+        _settingsSignature = signature;
+        [self rebuildSettingsCards:cap];
+    }
+
+    std::vector<unsigned char> presets = g_headphones->getAssignablePresets();
+    for (NSControl* control in _settingControls) {
+        NSInteger tag = control.tag;
+        BOOL enabled = YES;
+        if (tag >= 100) {
+            size_t k = (size_t)(tag - 100);
+            if (k < presets.size()) {
+                [(NSPopUpButton*)control selectItemWithTag:presets[k]];
+                NSString* actions = AssignableActionsText(presets[k]);
+                _assignableHints[@(k)].stringValue = actions ?: @"";
+                _assignableHints[@(k)].hidden = actions == nil;
+            }
+            enabled = cap.assignableEnabled;
+        } else {
+            SETTING setting = (SETTING)tag;
+            std::optional<int> value = g_headphones->getSetting(setting);
+            if (!value)
+                continue;
+            if ([control isKindOfClass:NSPopUpButton.class])
+                [(NSPopUpButton*)control selectItemWithTag:*value];
+            else
+                ((NSButton*)control).state = *value ? NSControlStateValueOn : NSControlStateValueOff;
+            auto it = cap.enabled.find(setting);
+            enabled = it == cap.enabled.end() || it->second;
+        }
+        control.enabled = enabled;
+    }
+
+    _connectionCard.hidden = _connectionGrid.numberOfRows == 0;
+    _controlsCard.hidden = NO;
+    _powerOffButton.hidden = !g_headphones->supportsFunction(FUNCTION::POWER_OFF);
+    if (_controlsGrid.numberOfRows == 0 && _powerOffButton.hidden)
+        _controlsCard.hidden = YES;
+}
+
+- (void)settingControlChanged:(NSControl*)sender {
+    NSInteger tag = sender.tag;
+    if (tag >= 100) {
+        std::vector<unsigned char> presets = g_headphones->getAssignablePresets();
+        size_t k = (size_t)(tag - 100);
+        if (k < presets.size()) {
+            presets[k] = (unsigned char)((NSPopUpButton*)sender).selectedItem.tag;
+            g_headphones->setAssignablePresets(presets);
+        }
+    } else if ([sender isKindOfClass:NSPopUpButton.class]) {
+        g_headphones->setSetting((SETTING)tag, (int)((NSPopUpButton*)sender).selectedItem.tag);
+    } else {
+        g_headphones->setSetting((SETTING)tag, ((NSButton*)sender).state == NSControlStateValueOn ? 1 : 0);
+    }
+    [self scheduleApply];
+    [self refreshUI];
+}
+
+- (void)powerOffClicked:(id)sender {
+    NSAlert* alert = [NSAlert new];
+    alert.messageText = @"Turn off the headphones?";
+    alert.informativeText = @"You'll need to turn them on again with their power button.";
+    [alert addButtonWithTitle:@"Power Off"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse response) {
+        if (response != NSAlertFirstButtonReturn || self->_state != ConnectionStateReady)
+            return;
+        dispatch_async(self->_ioQueue, ^{
+            try {
+                g_headphones->powerOff();
+            } catch (const std::exception&) {
+                // the link usually drops right away; the connection check handles it
+            }
+        });
+    }];
+}
+
+// The headphones ask before changes that disconnect them; they wait for this answer.
+- (void)showDeviceAlert:(unsigned char)message needsChoice:(bool)needsChoice {
+    if (_state == ConnectionStateDisconnected)
+        return;
+    NSAlert* alert = [NSAlert new];
+    alert.messageText = @"Headphones";
+    alert.informativeText = AlertText(message);
+    [alert addButtonWithTitle:needsChoice ? @"Continue" : @"OK"];
+    if (needsChoice)
+        [alert addButtonWithTitle:@"Cancel"];
+    void (^answer)(NSModalResponse) = ^(NSModalResponse response) {
+        bool accept = response == NSAlertFirstButtonReturn;
+        dispatch_async(self->_ioQueue, ^{
+            try {
+                g_headphones->answerAlert(message, accept);
+            } catch (const std::exception&) {
+            }
+        });
+        if (!accept) // the device keeps the old value; re-read so the UI matches
+            [self refreshUI];
+    };
+    NSWindow* window = self.view.window;
+    if (window.isVisible)
+        [alert beginSheetModalForWindow:window completionHandler:answer];
+    else
+        answer([alert runModal]);
 }
 
 - (NSView*)buildOptimizerCard {
@@ -1119,6 +1470,9 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
     _s2cCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::SPEAK_TO_CHAT);
     _optimizerCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::OPTIMIZER);
     _eqCard.hidden = !ready || !g_headphones->getEqCapability().available;
+    if (!ready) {
+        _connectionCard.hidden = _controlsCard.hidden = YES;
+    }
     _devicesCard.hidden = !ready || !(caps & DEVICE_CAPABILITIES::MULTI_POINT);
     if (!ready)
         return;
@@ -1173,6 +1527,7 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
     [self refreshDevicesList];
     if (!_eqCard.hidden)
         [self refreshEq:s mouseDown:mouseDown];
+    [self refreshSettingsCards];
 }
 
 - (void)refreshDevicesList {

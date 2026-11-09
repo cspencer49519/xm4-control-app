@@ -12,6 +12,8 @@
 #include <chrono>
 #include <functional>
 #include <condition_variable>
+#include <map>
+#include <optional>
 
 template <class T>
 struct Property {
@@ -94,6 +96,75 @@ struct DeviceStatus
 	bool upscalingActive = false;
 };
 
+// Simple device settings with one integer value each (see HeadphonesDeviceSettings.cpp).
+enum class SETTING
+{
+	PAUSE_WHEN_REMOVED,   // bool (SYSTEM 0x03 control by wearing)
+	AUTO_POWER_OFF,       // AutoPowerOffElementId (SYSTEM 0x04)
+	CONNECTION_MODE,      // 0 = sound quality, 1 = stable connection (AUDIO 0x01)
+	UPSCALING,            // 0 = off, 1 = auto (AUDIO 0x02, DSEE)
+	VOICE_GUIDANCE,       // bool (table 2)
+	GENERAL_SETTING_1,    // bool or list index, described by GeneralSettingCapability
+	GENERAL_SETTING_2,
+	GENERAL_SETTING_3,
+};
+
+// AutoPowerOffElementId
+inline constexpr unsigned char AUTO_POWER_OFF_5_MIN = 0x00;
+inline constexpr unsigned char AUTO_POWER_OFF_30_MIN = 0x01;
+inline constexpr unsigned char AUTO_POWER_OFF_60_MIN = 0x02;
+inline constexpr unsigned char AUTO_POWER_OFF_180_MIN = 0x03;
+inline constexpr unsigned char AUTO_POWER_OFF_WHEN_REMOVED = 0x10;
+inline constexpr unsigned char AUTO_POWER_OFF_DISABLED = 0x11;
+
+// AssignableSettingsPreset (custom button function)
+inline constexpr unsigned char ASSIGNABLE_AMBIENT_SOUND_CONTROL = 0x00;
+inline constexpr unsigned char ASSIGNABLE_VOLUME_CONTROL = 0x10;
+inline constexpr unsigned char ASSIGNABLE_PLAYBACK_CONTROL = 0x20;
+inline constexpr unsigned char ASSIGNABLE_VOICE_RECOGNITION = 0x30;
+inline constexpr unsigned char ASSIGNABLE_GOOGLE_ASSISTANT = 0x31;
+inline constexpr unsigned char ASSIGNABLE_AMAZON_ALEXA = 0x32;
+inline constexpr unsigned char ASSIGNABLE_TENCENT_XIAOWEI = 0x33;
+inline constexpr unsigned char ASSIGNABLE_NO_FUNCTION = 0xff;
+
+struct AssignableKey
+{
+	unsigned char key;        // 0 left, 1 right, 2 custom, 3 C
+	unsigned char keyType;    // 0 touch sensor, 1 button
+	unsigned char defaultPreset;
+	std::vector<unsigned char> presets;
+};
+
+struct GeneralSettingItem
+{
+	bool enumName = false;    // name is a symbolic key (e.g. "TOUCH_PANEL_SETTING") rather than display text
+	std::string name;
+	std::string description;
+};
+
+// A setting the device describes itself (GENERAL_SETTING 0xD1-0xD3).
+struct GeneralSettingCapability
+{
+	bool available = false;
+	GeneralSettingItem title;
+	bool isList = false;      // false: on/off toggle; true: pick one of `items`
+	std::vector<GeneralSettingItem> items;
+};
+
+struct DeviceSettingsCapability
+{
+	bool pauseWhenRemoved = false;
+	std::vector<unsigned char> autoPowerOffElements;
+	std::vector<AssignableKey> assignableKeys;
+	bool connectionMode = false;
+	bool upscaling = false;
+	UPSCALING_TYPE upscalingType = UPSCALING_TYPE::DSEE_HX;
+	bool voiceGuidance = false;
+	GeneralSettingCapability general[3];
+	std::map<SETTING, bool> enabled;   // false while the device has the setting greyed out
+	bool assignableEnabled = true;
+};
+
 class Headphones {
 public:
 	Headphones(BluetoothWrapper& conn);
@@ -148,6 +219,20 @@ public:
 	// Set all band levels (raw steps); the device switches to the "Manual" preset.
 	void setEqBands(const std::vector<unsigned char>& bands);
 	void queryDeviceInfo(DEVICE_INFO_TYPE type);
+
+	// --- Device settings (HeadphonesDeviceSettings.cpp) ---
+	DeviceSettingsCapability getSettingsCapability();
+	// Value as last reported by the device (or the pending change); empty until known.
+	std::optional<int> getSetting(SETTING setting);
+	void setSetting(SETTING setting, int value);
+	std::vector<unsigned char> getAssignablePresets();
+	void setAssignablePresets(const std::vector<unsigned char>& presets);
+	// Turn the headphones off (sends immediately; call from a background thread).
+	void powerOff();
+	// Called on the listener thread when the device asks for confirmation, e.g. before a
+	// change that will disconnect it. Answer with answerAlert() (from a background thread).
+	void setAlertCallback(std::function<void(unsigned char messageType, bool needsChoice)> callback);
+	void answerAlert(unsigned char messageType, bool accept);
 	void queryBattery();
 	void queryCodec();
 	void queryUpscalingIndicator();
@@ -178,6 +263,13 @@ public:
 	int getAmbientSteps();
 private:
 	void _markLoaded(unsigned int flags);
+	void _queryDeviceSettings();
+	void _sendDeviceSettingChanges();
+	bool _deviceSettingsChanged();   // caller holds _propertyMtx
+	void _resetDeviceSettings();     // caller holds _propertyMtx
+	// Returns true if the message was a device-settings message (caller then notifies).
+	bool _handleDeviceSettingsReply(const Buffer& bytes);
+	void _handleTable2Reply(const Buffer& bytes);
 	void _notifyStateChanged();
 
 	std::atomic<unsigned int> _capabilities = 0;
@@ -192,6 +284,13 @@ private:
 	unsigned char _eqInquiredType = EQ_TYPE_PRESET_EQ;
 	Property<unsigned char> _eqPreset = { 0, 0 };
 	Property<std::vector<unsigned char>> _eqBands = { {}, {} };
+
+	DeviceSettingsCapability _settingsCapability;
+	std::map<SETTING, Property<int>> _settings;      // present once the device reported a value
+	unsigned char _autoPowerOffSelectTime = AUTO_POWER_OFF_30_MIN;
+	Property<std::vector<unsigned char>> _assignablePresets = { {}, {} };
+	std::mutex _alertMtx;
+	std::function<void(unsigned char, bool)> _alertCallback;
 
 	Property<bool> _ambientSoundControl = { 0, 0 };
 	Property<bool> _focusOnVoice = { 0, 0 };

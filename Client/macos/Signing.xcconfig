@@ -1,0 +1,20 @@
+// Code signing for the macOS app.
+//
+// The default is ad-hoc signing ("-"), so anyone can build without a certificate.
+// macOS ties privacy permissions (Bluetooth) to the signature, and an ad-hoc
+// signature changes on every build, so the app asks for Bluetooth access again
+// after each rebuild. To keep the permission, sign with your own certificate:
+// create Local.xcconfig next to this file (it is git-ignored) containing
+//
+//   CODE_SIGN_IDENTITY = Apple Development
+//   CODE_SIGN_STYLE = Manual
+//   DEVELOPMENT_TEAM = <your team ID>
+//
+// Your team ID is the OU field of the certificate:
+//   security find-certificate -c "Apple Development" -p | openssl x509 -noout -subject
+
+CODE_SIGN_IDENTITY = -
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"

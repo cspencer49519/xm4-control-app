@@ -185,7 +185,8 @@ bool Headphones::isChanged()
 		this->_dev1.isFulfilled() &&
 		this->_dev2.isFulfilled() &&
 		this->_eqPreset.isFulfilled() &&
-		this->_eqBands.isFulfilled()
+		this->_eqBands.isFulfilled() &&
+		!this->_deviceSettingsChanged()
 		);
 }
 
@@ -327,6 +328,8 @@ void Headphones::setChanges()
 		this->_eqBands.markSent(eqBands);
 	}
 
+	this->_sendDeviceSettingChanges();
+
 	bool vptPending;
 	int vptDesired, vptCurrent;
 	SOUND_POSITION_PRESET positionDesired, positionCurrent;
@@ -421,6 +424,7 @@ void Headphones::resetState()
 		this->_eqInquiredType = EQ_TYPE_PRESET_EQ;
 		this->_eqPreset.setState(0);
 		this->_eqBands.setState({});
+		this->_resetDeviceSettings();
 		this->_ambientSoundControl.setState(false);
 		this->_focusOnVoice.setState(false);
 		this->_asmLevel.setState(0);
@@ -485,6 +489,8 @@ bool Headphones::syncState(std::chrono::milliseconds timeout)
 		this->queryEq();
 		expected |= STATE_EQ | STATE_EQ_CAPABILITY;
 	}
+	// Settings appear in the UI as their values arrive; they don't hold up the sync.
+	this->_queryDeviceSettings();
 	if (caps & DEVICE_CAPABILITIES::VPT)
 	{
 		this->queryVpt();
@@ -632,6 +638,27 @@ void Headphones::setStateFromReply(BtMessage replyMessage)
 
 	auto byteAt = [&bytes](size_t i) { return static_cast<unsigned char>(bytes[i]); };
 	COMMAND_TYPE cmd = static_cast<COMMAND_TYPE>(bytes[0]);
+
+	// Table 1 (DATA_MDR) and table 2 (DATA_MDR_NO2) reuse opcodes, so dispatch on the data type first.
+	bool isPairedDevicesReply = cmd == COMMAND_TYPE::DEVICES_QUERY_RESPONSE || cmd == COMMAND_TYPE::DEVICES_STATE_RESPONSE;
+	if (replyMessage.dataType == DATA_TYPE::DATA_MDR_NO2)
+	{
+		if (!isPairedDevicesReply)
+		{
+			this->_handleTable2Reply(bytes);
+			return;
+		}
+	}
+	else
+	{
+		if (isPairedDevicesReply)
+			return; // table 1 0x37 is a firmware-update reply, not the device list
+		if (this->_handleDeviceSettingsReply(bytes))
+		{
+			this->_notifyStateChanged();
+			return;
+		}
+	}
 
 	switch (cmd)
 	{
