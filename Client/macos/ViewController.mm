@@ -217,7 +217,11 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
 
     // Tabs
     NSSegmentedControl* _tabBar;
-    NSTabView* _tabView;
+    // Holds every tab page. Pages stay in the window and are only hidden, so they keep
+    // laying out while another tab is shown (NSTabView detaches them, and pages rebuilt
+    // while detached came back empty).
+    NSView* _tabView;
+    NSArray<NSView*>* _tabPages;
 
     // Now playing
     NSView* _nowPlayingCard;
@@ -512,22 +516,27 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
                                                       action:@selector(tabChanged:)];
     _tabBar.segmentDistribution = NSSegmentDistributionFillEqually;
     _tabBar.translatesAutoresizingMaskIntoConstraints = NO;
-    _tabView = [NSTabView new];
-    _tabView.tabViewType = NSNoTabsNoBorder;
-    _tabView.drawsBackground = NO;
+    _tabView = [NSView new];
     _tabView.translatesAutoresizingMaskIntoConstraints = NO;
+    NSMutableArray<NSView*>* pages = [NSMutableArray array];
     for (NSUInteger i = 0; i < tabTitles.count; i++) {
         [_tabBar setImage:[NSImage imageWithSystemSymbolName:tabSymbols[i] accessibilityDescription:nil] forSegment:i];
         [_tabBar setImageScaling:NSImageScaleProportionallyDown forSegment:i];
-        NSTabViewItem* item = [NSTabViewItem tabViewItemWithViewController:[NSViewController new]];
-        item.label = tabTitles[i];
-        item.view = [self tabColumnWithCards:tabCards[i]];
-        [_tabView addTabViewItem:item];
+        NSView* page = [self tabColumnWithCards:tabCards[i]];
+        [_tabView addSubview:page];
+        [NSLayoutConstraint activateConstraints:@[
+            [page.leadingAnchor constraintEqualToAnchor:_tabView.leadingAnchor],
+            [page.trailingAnchor constraintEqualToAnchor:_tabView.trailingAnchor],
+            [page.topAnchor constraintEqualToAnchor:_tabView.topAnchor],
+            [page.bottomAnchor constraintEqualToAnchor:_tabView.bottomAnchor],
+        ]];
+        [pages addObject:page];
     }
+    _tabPages = pages;
     NSInteger savedTab = [[NSUserDefaults standardUserDefaults] integerForKey:kSelectedTabKey];
     savedTab = std::clamp<NSInteger>(savedTab, 0, tabTitles.count - 1);
     _tabBar.selectedSegment = savedTab;
-    [_tabView selectTabViewItemAtIndex:savedTab];
+    [self showTab:savedTab];
 
     // Fixed top area: header, now playing, tab bar (or the getting-started card).
     NSStackView* top = MakeStack(NSUserInterfaceLayoutOrientationVertical, 12, @[header, _nowPlayingCard, _emptyCard, _tabBar]);
@@ -552,8 +561,13 @@ static NSGridView* MakeFormGrid(NSArray<NSArray<NSView*>*>* rows) {
     ]];
 }
 
+- (void)showTab:(NSInteger)index {
+    for (NSUInteger i = 0; i < _tabPages.count; i++)
+        _tabPages[i].hidden = (NSInteger)i != index;
+}
+
 - (void)tabChanged:(NSSegmentedControl*)sender {
-    [_tabView selectTabViewItemAtIndex:sender.selectedSegment];
+    [self showTab:sender.selectedSegment];
     [[NSUserDefaults standardUserDefaults] setInteger:sender.selectedSegment forKey:kSelectedTabKey];
 }
 
