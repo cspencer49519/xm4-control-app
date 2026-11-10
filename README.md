@@ -1,383 +1,154 @@
-# Sony Headphones Client (Enhanced Fork)
+# Sony Headphones Client for macOS
+
+A native macOS app for Sony headphones. Sony's Sound Connect app runs only on
+phones; this app puts the same controls on your Mac. It is built and tested
+against the **WH-1000XM4** (firmware 3.0.1). Other models that use Sony's MDR
+protocol v1 may work, because the app shows only the features the headphones
+report.
 
 <p align="center">
-
-# Sony Headphones Client
-
-Desktop alternative to Sony's mobile-only Headphones application.
-
-Manage Sony headphone settings directly from Linux, Windows and macOS.
-
-Maintained fork with UI redesign, Linux improvements, Bluetooth fixes and better compatibility with modern systems.
-
+<img src="static/sound-tab.png" width="380" alt="Sound tab: noise control, equalizer and NC Optimizer">
+<img src="static/controls-tab.png" width="380" alt="Controls tab: Speak-to-Chat, buttons and power">
 </p>
 
----
+## Features
 
-## About This Fork
+**Sound**
+- Noise cancelling, Ambient Sound (all 20 levels) and Off, with Focus on voice and wind noise reduction
+- Equalizer: the headphones' presets, the 5 bands and Clear Bass
+- NC Optimizer
+- Surround (VPT) and sound position, on models that have them
 
-This project is a maintained fork of the original Sony Headphones Client by Plutoberth.
+**Controls**
+- Speak-to-Chat, with sensitivity, end time and voice passthrough
+- Custom button (Ambient Sound Control, Google Assistant or Alexa) and the touch sensor panel
+- Pause when taken off, auto power off and voice guidance
+- Power off the headphones
 
-The original repository became inactive, so this fork continues development with:
+**Connection**
+- Bluetooth priority (sound quality or stable connection) and DSEE Extreme
+- Multipoint on/off, and the paired-devices list, where you can connect or disconnect each device
 
-- Linux improvements
-- Wayland compatibility fixes
-- UI redesign
-- Bluetooth reliability fixes
-- WH-1000XM4 improvements
-- Better startup and shutdown handling
-- Ongoing maintenance
+**Always visible**
+- Battery level, firmware and codec
+- Play/pause, next/previous track and headphone volume
+- Changes made on the headphones or on another device show up live
 
----
-
-# Screenshots
-
-Enhanced Linux UI
+**Mac extras**
+- A menu bar icon with battery, noise mode and playback controls; the Dock icon can be hidden
+- Automatic connection when the headphones turn on, with quiet retries
+- Low-battery notifications at 20% and 10%
+- Keyboard shortcuts (below)
+- **Noise control by Wi-Fi network:** save a mode for each network, such as Noise Cancelling at
+  home and Ambient Sound at the office. A Mac version of the places part of Sony's Adaptive Sound Control.
+- **Ambient Sound during calls:** when an app uses the microphone, the headphones switch to Ambient
+  Sound so you hear your own voice, then switch back afterwards. The WH-1000XM4 has no sidetone setting.
+- **Preferred microphone:** keep another microphone as the Mac's input. When an app uses the
+  headphones' microphone, they switch to the Bluetooth call profile and music drops to mono call
+  quality. A separate mic keeps music at full quality.
+- Open at login
 
 <p align="center">
-<img src="static/newUI.png" width="1000">
+<img src="static/settings.png" width="420" alt="Settings window">
 </p>
 
-Modernized interface:
+### Keyboard shortcuts
 
-- adaptive full-screen layout
-- cleaner spacing
-- capability-aware controls
-- improved connection handling
-- enhanced Linux support
+| Action | Shortcut |
+|---|---|
+| Noise Cancelling / Ambient Sound / Off | ⌥⌘1 / ⌥⌘2 / ⌥⌘3 |
+| Play / pause | ⌥⌘P |
+| Previous / next track | ⌥⌘← / ⌥⌘→ |
+| Volume down / up | ⌥⌘↓ / ⌥⌘↑ |
+| Reload settings from the headphones | ⌘R |
+| Connect / disconnect | ⌘K |
+| Sound / Controls / Connection tab | ⌘1 / ⌘2 / ⌘3 |
 
----
+They work while the app is in front.
 
-# Features
+## Requirements
 
-Current implemented functionality:
+- macOS 12 or later; Open at login needs macOS 13
+- Xcode, to build
+- Headphones paired with the Mac in System Settings → Bluetooth
 
-- [x] Ambient Sound Control
-- [x] Noise Cancelling
-- [x] Speak To Chat
-- [x] Multipoint Device Controls
-- [x] Virtual Sound / VPT
-- [x] Sound Position Controls
-- [x] Optimizer
-- [x] Capability detection
-- [x] Improved Linux Bluetooth support
-- [x] Wayland support improvements
-- [x] WH-1000XM4 improvements
-- [x] Automatic state synchronization
-- [x] Clean shutdown handling
-
-Planned:
-
-- [ ] Battery display
-- [ ] Equalizer
-- [ ] Read full device state
-- [ ] Additional Sony device support
-
----
-
-# Supported Platforms
-
-- Linux (X11-Wayland)
-- Windows
-- macOS
-
-
-Special support focus:
-
-- Debian
-- Ubuntu
-- Fedora
-
----
-
-# Supported Headsets
-
-Known working devices:
-
-- WH-1000XM3
-- WH-1000XM4
-- MDR-XB950BT
-
-Other devices may work.
-
-Compatibility reports are welcome.
-
----
-
-# Installation
-
-Clone recursively:
+## Build and install
 
 ```bash
-git clone --recurse-submodules \
-https://github.com/jespinobe/SonyHeadphonesClient.git
+git clone --recurse-submodules git@192.168.0.50:ai-projects/xm4-control-app.git
+cd xm4-control-app/Client/macos
+xcodebuild -project SonyHeadphonesClient.xcodeproj -scheme SonyHeadphonesClient \
+  -configuration Release -derivedDataPath build build
+cp -R build/Build/Products/Release/SonyHeadphonesClient.app /Applications/
 ```
 
-If submodules fail:
+You can also open `Client/macos/SonyHeadphonesClient.xcodeproj` in Xcode and run it.
+
+### Code signing
+
+By default the app is signed ad hoc, so you can build it without a certificate.
+However, macOS ties privacy permissions to the signature, and an ad-hoc signature
+changes with every build, so you're asked for Bluetooth access again after each
+rebuild. To avoid this, create `Client/macos/Local.xcconfig`. The file is git-ignored.
+
+```
+CODE_SIGN_IDENTITY = Apple Development
+CODE_SIGN_STYLE = Manual
+DEVELOPMENT_TEAM = <your team ID>
+```
+
+Your team ID is the OU field of your certificate:
+`security find-certificate -c "Apple Development" -p | openssl x509 -noout -subject`
+
+### Permissions
+
+| Permission | Why |
+|---|---|
+| Bluetooth | Talk to the headphones |
+| Notifications | Low-battery alerts; optional |
+| Location | Read the Wi-Fi network name, which macOS treats as location data. Asked for only when you set up noise control by Wi-Fi network; your location isn't recorded |
+
+## Known limits
+
+- **Song titles** appear only when a phone is the playing device. macOS doesn't send track
+  names to Bluetooth headphones, so while the Mac plays, the strip shows "Playing" or "Paused".
+- **Microphone quality on calls** depends on the Bluetooth call codec macOS negotiates. The
+  headphones offer no setting for it.
+- **Sidetone** ("Capture voice during a phone call") isn't available on the WH-1000XM4.
+  Newer models that have it get the toggle on the Controls tab automatically.
+- **Volume range:** treated as 0–30. The headphones report 31 levels and have never reported 31.
+
+## Linux and Windows
+
+The cross-platform Dear ImGui client in `Client/` shares the same protocol core and
+builds with CMake. It has an older, smaller feature set and isn't tested on this
+branch; the macOS app is the maintained client.
 
 ```bash
-git submodule sync
-git submodule update --init --recursive
+cd Client && mkdir build && cd build
+cmake .. && cmake --build . -j
 ```
 
----
+On Debian or Ubuntu, install `libbluetooth-dev libglew-dev libglfw3-dev libdbus-1-dev`
+first. `packaging/install.sh` installs a Linux desktop launcher.
 
-# Build
+## For developers
 
-## Debian / Ubuntu
+- [`docs/PROTOCOL.md`](docs/PROTOCOL.md) documents Sony's MDR protocol v1 as the WH-1000XM4 uses it:
+  framing, every command group, and packets captured from real headphones.
+- Set `SONY_HEADPHONES_DEBUG=1` to log every packet in both directions:
+  `SONY_HEADPHONES_DEBUG=1 /Applications/SonyHeadphonesClient.app/Contents/MacOS/SonyHeadphonesClient`
+- `tests/run.sh` runs the protocol tests against a simulated headset, under
+  AddressSanitizer/UBSan and ThreadSanitizer.
 
-Install dependencies:
+## Credits
 
-```bash
-sudo apt install \
-libbluetooth-dev \
-libglew-dev \
-libglfw3-dev \
-libdbus-1-dev
-```
+This app grew out of [**SonyHeadphonesClient**](https://github.com/Plutoberth/SonyHeadphonesClient)
+by Plutoberth and contributors, now archived: Plutoberth, aybruh00, Mr-M33533K5, semvis123
+(original macOS support), jimzrt (Linux support) and guilhermealbm (noise cancelling controls).
+It continued through [jespinobe's fork](https://github.com/jespinobe/SonyHeadphonesClient),
+which added Linux and Wayland fixes. Thanks to everyone who worked on them.
 
-Create build directory:
+## License
 
-```bash
-cd Client
-
-mkdir build
-
-cd build
-```
-
-Configure:
-
-```bash
-cmake ..
-```
-
-If CMake policy errors appear:
-
-```bash
-cmake .. \
--DCMAKE_POLICY_VERSION_MINIMUM=3.5
-```
-
-Compile:
-
-```bash
-cmake --build . -j$(nproc)
-```
-
-Run:
-
-```bash
-./SonyHeadphonesClient
-```
-
----
-
-## Fedora
-
-```bash
-sudo dnf install \
-bluez-libs-devel \
-glew-devel \
-glfw-devel \
-dbus-devel
-```
-
----
-
-## Windows
-
-Requirements:
-
-- Visual Studio Community 2022
-- C++ Desktop Components
-- Windows SDK
-- CMake
-
-Build:
-
-```bash
-cd Client
-
-mkdir build
-
-cd build
-
-cmake ..
-
-cmake --build .
-```
-
----
-
-## macOS
-
-Use included Xcode project.
-
----
-
-# Desktop Installation (Linux)
-
-The project includes an installer script that:
-
-- installs application into `/opt`
-- creates desktop launcher
-- registers menu entry
-- installs icon
-- allows launching directly from desktop menus
-
-Run:
-
-```bash
-cd packaging
-
-chmod +x install.sh
-
-./install.sh
-```
-
-Application appears as:
-
-```text
-Sony Headphones Client
-```
-
-inside your desktop launcher.
-
----
-
-# Linux Notes
-
-If headphones connect but controls do not appear:
-
-Verify:
-
-- headphones are paired
-- headphones are connected through BlueZ
-- RFCOMM service is available
-- audio profile is active
-
-Useful commands:
-
-List devices:
-
-```bash
-bluetoothctl devices
-```
-
-Connect manually:
-
-```bash
-bluetoothctl
-connect XX:XX:XX:XX:XX
-```
-
-Bluetooth logs:
-
-```bash
-journalctl -f | grep bluetooth
-```
-
----
-
-# What's New In This Fork
-
-## UI Improvements
-
-- redesigned interface
-- cleaner layout
-- adaptive sizing
-- better readability
-- improved status display
-- improved visual feedback
-
-## Linux Improvements
-
-- Wayland compatibility improvements
-- Bluetooth fixes
-- better connection handling
-- improved async behavior
-- fixed listener initialization
-- fixed shutdown hangs
-
-## Device Improvements
-
-- improved WH-1000XM4 support
-- automatic state synchronization
-- capability refresh after connect
-- more reliable initialization
-
-## Stability Improvements
-
-- reduced duplicate commands
-- commands only sent on changes
-- better error handling
-- clean thread shutdown
-- improved disconnect handling
-
----
-
-# Development Notes
-
-Important fixes implemented:
-
-### Listener startup
-
-```cpp
-this->_listener=
-std::make_unique<Listener>(
-    this->_headphones,
-    this->_bt
-);
-```
-
-### Automatic state sync
-
-```cpp
-this->_headphones.queryState();
-```
-
-### Proper shutdown handling
-
-Background listener threads now terminate correctly on disconnect and application exit.
-
----
-
-# Original Project
-
-Original archived repository:
-
-https://github.com/Plutoberth/SonyHeadphonesClient
-
-Huge thanks to the original contributors.
-
----
-
-# Contributors
-
-Original project:
-
-- Plutoberth — Initial implementation
-- aybruh00 
-- Mr-M33533K5 — Bluetooth interface
-- semvis123 — macOS support
-- jimzrt — Linux support
-- guilhermealbm — Noise cancelling controls
-
-Fork improvements:
-
-- Linux redesign
-- Wayland support
-- Bluetooth fixes
-- WH-1000XM4 support
-- UI modernization
-- shutdown fixes
-- ongoing maintenance
-
----
-
-# License
-
-Distributed under MIT License.
-
-See LICENSE for additional information.
+MIT. See [LICENSE](LICENSE).
