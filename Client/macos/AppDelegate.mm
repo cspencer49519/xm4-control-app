@@ -7,6 +7,7 @@
 
 #import "AppDelegate.h"
 #import <ServiceManagement/ServiceManagement.h>
+#import "NetworkModes.h"
 
 NSString* const kHideDockIconKey = @"HideDockIconWhenHidden";
 NSString* const kAutoConnectKey = @"AutoConnectOnLaunch";
@@ -40,6 +41,8 @@ static BOOL HideDockIconEnabled(void) {
 @implementation AppDelegate {
     NSWindow* _settingsWindow;
     NSButton* _launchAtLogin;
+    NSStackView* _networkList;
+    id _networkObserver;
 }
 
 + (void)initialize {
@@ -47,6 +50,7 @@ static BOOL HideDockIconEnabled(void) {
         kHideDockIconKey: @NO,
         kAutoConnectKey: @YES,
         kLowBatteryNotifyKey: @YES,
+        kNetworkModesEnabledKey: @YES,
     }];
 }
 
@@ -132,7 +136,15 @@ static NSView* MakeNote(NSString* text) {
         NSButton* lowBattery = MakeCheckbox(@"Notify when the battery is low", kLowBatteryNotifyKey, self, @selector(toggleSetting:));
         NSView* lowBatteryNote = MakeNote(@"At 20% and 10%, once per charge.");
 
-        NSMutableArray<NSView*>* views = [NSMutableArray arrayWithArray:@[hideDock, hideDockNote, autoConnect, autoConnectNote, lowBattery, lowBatteryNote]];
+        NSButton* networkModes = MakeCheckbox(@"Switch noise control by Wi-Fi network", kNetworkModesEnabledKey, self, @selector(toggleSetting:));
+        NSView* networkNote = MakeNote(@"Save a mode for the network you're on from the Noise Control card. It's applied when you join that network or the headphones connect.");
+        _networkList = [NSStackView new];
+        _networkList.orientation = NSUserInterfaceLayoutOrientationVertical;
+        _networkList.alignment = NSLayoutAttributeLeading;
+        _networkList.spacing = 4;
+        _networkList.edgeInsets = NSEdgeInsetsMake(0, 20, 0, 0);
+
+        NSMutableArray<NSView*>* views = [NSMutableArray arrayWithArray:@[hideDock, hideDockNote, autoConnect, autoConnectNote, lowBattery, lowBatteryNote, networkModes, networkNote, _networkList]];
         if (@available(macOS 13.0, *)) {
             _launchAtLogin = [NSButton checkboxWithTitle:@"Open at login" target:self action:@selector(toggleLaunchAtLogin:)];
             [views addObject:_launchAtLogin];
@@ -146,6 +158,7 @@ static NSView* MakeNote(NSString* text) {
         [stack setCustomSpacing:18 afterView:hideDockNote];
         [stack setCustomSpacing:18 afterView:autoConnectNote];
         [stack setCustomSpacing:18 afterView:lowBatteryNote];
+        [stack setCustomSpacing:18 afterView:_networkList];
         stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
 
         _settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 420, 160)
@@ -157,13 +170,43 @@ static NSView* MakeNote(NSString* text) {
         _settingsWindow.contentView = stack;
         _settingsWindow.delegate = self;
         [_settingsWindow center];
+        __weak AppDelegate* weakSelf = self;
+        _networkObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NetworkModesDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
+            [weakSelf rebuildNetworkList];
+        }];
     }
+    [self rebuildNetworkList];
     if (@available(macOS 13.0, *))
         [self updateLaunchAtLogin];
     if (NSApp.activationPolicy != NSApplicationActivationPolicyRegular)
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     [NSApp activateIgnoringOtherApps:YES];
     [_settingsWindow makeKeyAndOrderFront:nil];
+}
+
+// One row per saved network, each with a Remove button.
+- (void)rebuildNetworkList {
+    for (NSView* view in [_networkList.arrangedSubviews copy])
+        [view removeFromSuperview];
+    NetworkModes* places = [NetworkModes shared];
+    for (NSString* network in [places savedNetworks]) {
+        NSTextField* label = [NSTextField labelWithString:[NSString stringWithFormat:@"%@: %@", network, [NetworkModes describeMode:[places modeForNetwork:network]]]];
+        label.font = [NSFont systemFontOfSize:12];
+        label.lineBreakMode = NSLineBreakByTruncatingTail;
+        [label.widthAnchor constraintLessThanOrEqualToConstant:270].active = YES;
+        NSButton* remove = [NSButton buttonWithTitle:@"Remove" target:self action:@selector(removeNetwork:)];
+        remove.controlSize = NSControlSizeSmall;
+        remove.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+        remove.identifier = network;
+        NSStackView* row = [NSStackView stackViewWithViews:@[label, remove]];
+        row.spacing = 8;
+        [_networkList addArrangedSubview:row];
+    }
+    _networkList.hidden = _networkList.arrangedSubviews.count == 0;
+}
+
+- (void)removeNetwork:(NSButton*)sender {
+    [[NetworkModes shared] setMode:nil forNetwork:sender.identifier];
 }
 
 - (void)toggleSetting:(NSButton*)sender {

@@ -15,6 +15,7 @@
 #import "ViewController.h"
 #include "Listener.h"
 #import <UserNotifications/UserNotifications.h>
+#import "NetworkModes.h"
 
 #include <algorithm>
 #include <memory>
@@ -292,6 +293,15 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
     NSTextField* _ambientValue;
     NSButton* _focusOnVoice;
 
+    // Noise control by Wi-Fi network
+    NSStackView* _placeRow;
+    NSTextField* _placeLabel;
+    NSButton* _placeButton;
+    // Network whose saved mode was last applied (or checked) for this connection.
+    NSString* _placeChecked;
+    id _placeObserver;
+    int _placePollTick;
+
     // Sound
     NSPopUpButton* _vptPopup;
     NSPopUpButton* _positionPopup;
@@ -351,6 +361,11 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
         StopConnection();
     }];
 
+    _placeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NetworkModesDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
+        [weakSelf networkModesChanged];
+    }];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(networkModesChanged) name:NSUserDefaultsDidChangeNotification object:nil];
+
     [self refreshUI];
 }
 
@@ -368,6 +383,9 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
     [_connectionTimer invalidate];
     if (_terminateObserver)
         [[NSNotificationCenter defaultCenter] removeObserver:_terminateObserver];
+    if (_placeObserver)
+        [[NSNotificationCenter defaultCenter] removeObserver:_placeObserver];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 #pragma mark - UI construction helpers
@@ -824,9 +842,20 @@ static NSButton* MakeSymbolButton(NSString* symbol, CGFloat size, id target, SEL
     _ambientOptions = MakeStack(NSUserInterfaceLayoutOrientationVertical, 8, @[sliderRow, _focusOnVoice]);
     [sliderRow.widthAnchor constraintEqualToAnchor:_ambientOptions.widthAnchor].active = YES;
 
-    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 12, @[_noiseMode, _ncOptions, _ambientOptions]);
+    _placeLabel = MakeLabel(@"", [NSFont systemFontOfSize:12], NSColor.secondaryLabelColor);
+    _placeLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [_placeLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    _placeButton = [NSButton buttonWithTitle:@"" target:self action:@selector(placeButtonClicked:)];
+    _placeButton.controlSize = NSControlSizeSmall;
+    _placeButton.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    _placeRow = MakeStack(NSUserInterfaceLayoutOrientationHorizontal, 6, @[
+        MakeSymbol(@"wifi", 11, NSColor.secondaryLabelColor), _placeLabel, MakeSpacer(), _placeButton,
+    ]);
+
+    NSStackView* body = MakeStack(NSUserInterfaceLayoutOrientationVertical, 12, @[_noiseMode, _ncOptions, _ambientOptions, _placeRow]);
     [_noiseMode.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
     [_ambientOptions.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
+    [_placeRow.widthAnchor constraintEqualToAnchor:body.widthAnchor].active = YES;
     return [self cardWithTitle:@"Noise Control" symbol:@"waveform" body:body];
 }
 
@@ -1661,6 +1690,7 @@ static NSMenuItem* ShortcutItem(NSString* title, id target, SEL action, NSString
             else if (!complete)
                 [strongSelf showMessage:@"Some settings couldn't be read from the headphones, so they may not match. Use the reload button to try again." isError:YES];
             [strongSelf refreshUI];
+            [strongSelf applyNetworkModeIfNeeded];
         });
     });
 }
@@ -1679,6 +1709,7 @@ static NSMenuItem* ShortcutItem(NSString* title, id target, SEL action, NSString
     _state = ConnectionStateDisconnected;
     _applying = NO;
     _devicesSignature = nil;
+    _placeChecked = nil;
     [self showMessage:message isError:YES];
     [self refreshUI];
     dispatch_async(_ioQueue, ^{
@@ -1688,6 +1719,8 @@ static NSMenuItem* ShortcutItem(NSString* title, id target, SEL action, NSString
 }
 
 - (void)checkConnection:(NSTimer*)timer {
+    if (++_placePollTick % 3 == 0 && [[NSUserDefaults standardUserDefaults] boolForKey:kNetworkModesEnabledKey])
+        [[NetworkModes shared] poll];
     if ((_state == ConnectionStateSyncing || _state == ConnectionStateReady) && !g_bt->isConnected())
         [self disconnectWithMessage:[[NSUserDefaults standardUserDefaults] boolForKey:kAutoConnectKey]
             ? @"The headphones disconnected. They'll reconnect here automatically when they're back."
@@ -1824,6 +1857,127 @@ static NSMenuItem* ShortcutItem(NSString* title, id target, SEL action, NSString
     [self scheduleApply];
 }
 
+#pragma mark - Noise control by Wi-Fi network
+
+- (NSDictionary<NSString*, NSNumber*>*)currentNoiseModeForSaving {
+    HeadphonesSettings s = g_headphones->getSettings();
+    NoiseMode mode = [self noiseModeForSettings:s];
+    switch (mode) {
+        case NoiseModeCancelling:
+            return @{ kNetworkModeMode: @0, kNetworkModeWind: @(s.asmLevel == 1) };
+        case NoiseModeAmbient:
+            return @{ kNetworkModeMode: @1, kNetworkModeLevel: @(s.asmLevel - kAmbientMinLevel + 1),
+                      kNetworkModeVoice: @(s.asmLevel > MINIMUM_VOICE_FOCUS_STEP && s.focusOnVoice) };
+        default:
+            return @{ kNetworkModeMode: @2 };
+    }
+}
+
+- (void)networkModesChanged {
+    if (_state != ConnectionStateReady)
+        return;
+    [self refreshPlaceRow:g_headphones->getSettings()];
+    [self applyNetworkModeIfNeeded];
+}
+
+// Applies the saved mode once per network per connection, so a mode picked by hand
+// afterwards stays until the network changes or the headphones reconnect.
+- (void)applyNetworkModeIfNeeded {
+    NetworkModes* places = [NetworkModes shared];
+    NSString* network = places.currentNetwork;
+    if (_state != ConnectionStateReady || network == nil || [network isEqualToString:_placeChecked]
+        || ![[NSUserDefaults standardUserDefaults] boolForKey:kNetworkModesEnabledKey]
+        || !(g_headphones->getCapabilities() & DEVICE_CAPABILITIES::NC_ASM))
+        return;
+    _placeChecked = network;
+    NSDictionary<NSString*, NSNumber*>* saved = [places modeForNetwork:network];
+    if (!saved || [saved isEqualToDictionary:[self currentNoiseModeForSaving]])
+        return;
+
+    switch (saved[kNetworkModeMode].integerValue) {
+        case 0:
+            g_headphones->setAmbientSoundControl(true);
+            g_headphones->setAsmLevel(saved[kNetworkModeWind].boolValue ? 1 : 0);
+            break;
+        case 1: {
+            int level = std::clamp((int)saved[kNetworkModeLevel].integerValue, 1, g_headphones->getAmbientSteps());
+            _lastAmbientLevel = level + kAmbientMinLevel - 1;
+            g_headphones->setAmbientSoundControl(true);
+            g_headphones->setAsmLevel(_lastAmbientLevel);
+            g_headphones->setFocusOnVoice(_lastAmbientLevel > MINIMUM_VOICE_FOCUS_STEP && saved[kNetworkModeVoice].boolValue);
+            break;
+        }
+        default:
+            g_headphones->setAmbientSoundControl(false);
+            break;
+    }
+    [self scheduleApply];
+    [self showMessage:[NSString stringWithFormat:@"Switched to %@ for \u201c%@\u201d.", [NetworkModes describeMode:saved], network] isError:NO];
+    [self refreshUI];
+}
+
+- (void)refreshPlaceRow:(const HeadphonesSettings&)s {
+    NetworkModes* places = [NetworkModes shared];
+    _placeRow.hidden = ![[NSUserDefaults standardUserDefaults] boolForKey:kNetworkModesEnabledKey];
+    if (_placeRow.hidden)
+        return;
+    NSString* network = places.currentNetwork;
+    NSString* text;
+    NSString* button = nil;
+    switch (places.access) {
+        case WiFiNameAccessNotAsked:
+            text = @"Switch modes by Wi-Fi network";
+            button = @"Set Up\u2026";
+            break;
+        case WiFiNameAccessDenied:
+            text = @"Wi-Fi switching needs Location access";
+            button = @"Open Settings";
+            break;
+        case WiFiNameAccessAllowed:
+            if (!network) {
+                text = @"Not on Wi-Fi";
+            } else if (NSDictionary* saved = [places modeForNetwork:network]) {
+                text = [NSString stringWithFormat:@"On \u201c%@\u201d: %@", network, [NetworkModes describeMode:saved]];
+                button = [saved isEqualToDictionary:[self currentNoiseModeForSaving]] ? @"Forget" : @"Save Current Mode";
+            } else {
+                text = [NSString stringWithFormat:@"On \u201c%@\u201d", network];
+                button = @"Use This Mode Here";
+            }
+            break;
+    }
+    _placeLabel.stringValue = text;
+    _placeLabel.toolTip = text;
+    _placeButton.title = button ?: @"";
+    _placeButton.hidden = button == nil;
+}
+
+- (void)placeButtonClicked:(id)sender {
+    NetworkModes* places = [NetworkModes shared];
+    NSString* network = places.currentNetwork;
+    switch (places.access) {
+        case WiFiNameAccessNotAsked:
+            [places requestAccess];
+            return;
+        case WiFiNameAccessDenied:
+            [places openLocationSettings];
+            return;
+        case WiFiNameAccessAllowed:
+            break;
+    }
+    if (!network)
+        return;
+    NSDictionary* current = [self currentNoiseModeForSaving];
+    NSDictionary* saved = [places modeForNetwork:network];
+    _placeChecked = network; // don't re-apply what was just saved
+    if (saved && [saved isEqualToDictionary:current]) {
+        [places setMode:nil forNetwork:network];
+        [self showMessage:[NSString stringWithFormat:@"Forgot the mode for \u201c%@\u201d.", network] isError:NO];
+    } else {
+        [places setMode:current forNetwork:network];
+        [self showMessage:[NSString stringWithFormat:@"%@ will be used whenever you're on \u201c%@\u201d.", [NetworkModes describeMode:current], network] isError:NO];
+    }
+}
+
 #pragma mark - Refreshing the UI from state
 
 - (void)deviceStateChanged {
@@ -1952,6 +2106,7 @@ static NSMenuItem* ShortcutItem(NSString* title, id target, SEL action, NSString
     _focusOnVoice.enabled = voiceAvailable;
     _focusOnVoice.state = (voiceAvailable && s.focusOnVoice) ? NSControlStateValueOn : NSControlStateValueOff;
     _focusOnVoice.toolTip = voiceAvailable ? nil : @"Raise the ambient level to use Focus on voice";
+    [self refreshPlaceRow:s];
 
     // Sound
     [_vptPopup selectItemAtIndex:std::clamp(s.vptType, 0, (int)_vptPopup.numberOfItems - 1)];

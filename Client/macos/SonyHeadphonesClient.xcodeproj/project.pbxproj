@@ -13,6 +13,7 @@
 		C0FFEE01283EC38600148E80 /* Listener.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE03283EC38600148E80 /* Listener.cpp */; };
 		C0FFEE04283EC38600148E80 /* HeadphonesDeviceSettings.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE05283EC38600148E80 /* HeadphonesDeviceSettings.cpp */; };
 		C0FFEE08283EC38600148E80 /* HeadphonesPlayback.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE07283EC38600148E80 /* HeadphonesPlayback.cpp */; };
+		C0FFEE0B283EC38600148E80 /* NetworkModes.mm in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE0A283EC38600148E80 /* NetworkModes.mm */; };
 		A8DC78EB2576923D00447738 /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = A8DC78EA2576923D00447738 /* main.mm */; };
 		A8DC78EC2576923D00447738 /* MacOSBluetoothConnector.mm in Sources */ = {isa = PBXBuildFile; fileRef = A8DC78E82576923D00447738 /* MacOSBluetoothConnector.mm */; };
 		A8DC78F12576952E00447738 /* BluetoothWrapper.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A8DC78EF2576952E00447738 /* BluetoothWrapper.cpp */; };
@@ -36,6 +37,8 @@
 		C0FFEE03283EC38600148E80 /* Listener.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = Listener.cpp; path = ../Listener.cpp; sourceTree = "<group>"; };
 		C0FFEE06283EC38600148E80 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		C0FFEE05283EC38600148E80 /* HeadphonesDeviceSettings.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = HeadphonesDeviceSettings.cpp; path = ../HeadphonesDeviceSettings.cpp; sourceTree = "<group>"; };
+		C0FFEE09283EC38600148E80 /* NetworkModes.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = NetworkModes.h; sourceTree = "<group>"; };
+		C0FFEE0A283EC38600148E80 /* NetworkModes.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = NetworkModes.mm; sourceTree = "<group>"; };
 		C0FFEE07283EC38600148E80 /* HeadphonesPlayback.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = HeadphonesPlayback.cpp; path = ../HeadphonesPlayback.cpp; sourceTree = "<group>"; };
 		A8DC78E32576922700447738 /* info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = info.plist; sourceTree = "<group>"; };
 		A8DC78E62576922D00447738 /* SonyHeadphonesClient.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SonyHeadphonesClient.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -104,6 +107,8 @@
 				C0FFEE02283EC38600148E80 /* Listener.h */,
 				A8DC792B25769C9900447738 /* AppDelegate.h */,
 				A8DC792825769C9900447738 /* AppDelegate.mm */,
+				C0FFEE09283EC38600148E80 /* NetworkModes.h */,
+				C0FFEE0A283EC38600148E80 /* NetworkModes.mm */,
 				A8DC792925769C9900447738 /* ViewController.h */,
 				A8DC792A25769C9900447738 /* ViewController.mm */,
 				A8DC790325769A6600447738 /* Frameworks */,
@@ -199,6 +204,7 @@
 				A8DC78F52576953600447738 /* CommandSerializer.cpp in Sources */,
 				A8DC78FF2576967D00447738 /* ByteMagic.cpp in Sources */,
 				A8DC792C25769C9900447738 /* AppDelegate.mm in Sources */,
+				C0FFEE0B283EC38600148E80 /* NetworkModes.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -325,6 +331,10 @@
 					ServiceManagement,
 					"-framework",
 					UserNotifications,
+					"-framework",
+					CoreWLAN,
+					"-framework",
+					CoreLocation,
 				);
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
@@ -355,6 +365,10 @@
 					ServiceManagement,
 					"-framework",
 					UserNotifications,
+					"-framework",
+					CoreWLAN,
+					"-framework",
+					CoreLocation,
 				);
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
