@@ -16,6 +16,7 @@
 #include "Listener.h"
 #import <UserNotifications/UserNotifications.h>
 #import "NetworkModes.h"
+#import "AudioDevices.h"
 
 #include <algorithm>
 #include <memory>
@@ -302,6 +303,11 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
     id _placeObserver;
     int _placePollTick;
 
+    // Ambient Sound while the microphone is in use
+    NSDictionary<NSString*, NSNumber*>* _callRestoreMode; // mode before the call
+    NSDictionary<NSString*, NSNumber*>* _callAmbientMode; // what the call switched to
+    id _micObserver;
+
     // Sound
     NSPopUpButton* _vptPopup;
     NSPopUpButton* _positionPopup;
@@ -365,6 +371,10 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
         [weakSelf networkModesChanged];
     }];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(networkModesChanged) name:NSUserDefaultsDidChangeNotification object:nil];
+    _micObserver = [[NSNotificationCenter defaultCenter] addObserverForName:MicrophoneInUseDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
+        [weakSelf microphoneInUseChanged];
+    }];
+    [[AudioDevices shared] start];
 
     [self refreshUI];
 }
@@ -385,6 +395,8 @@ static NSString* UpscalingName(UPSCALING_TYPE type) {
         [[NSNotificationCenter defaultCenter] removeObserver:_terminateObserver];
     if (_placeObserver)
         [[NSNotificationCenter defaultCenter] removeObserver:_placeObserver];
+    if (_micObserver)
+        [[NSNotificationCenter defaultCenter] removeObserver:_micObserver];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
@@ -1710,6 +1722,7 @@ static NSMenuItem* ShortcutItem(NSString* title, id target, SEL action, NSString
     _applying = NO;
     _devicesSignature = nil;
     _placeChecked = nil;
+    _callRestoreMode = _callAmbientMode = nil;
     [self showMessage:message isError:YES];
     [self refreshUI];
     dispatch_async(_ioQueue, ^{
@@ -1893,7 +1906,12 @@ static NSMenuItem* ShortcutItem(NSString* title, id target, SEL action, NSString
     NSDictionary<NSString*, NSNumber*>* saved = [places modeForNetwork:network];
     if (!saved || [saved isEqualToDictionary:[self currentNoiseModeForSaving]])
         return;
+    [self applySavedNoiseMode:saved];
+    [self showMessage:[NSString stringWithFormat:@"Switched to %@ for \u201c%@\u201d.", [NetworkModes describeMode:saved], network] isError:NO];
+}
 
+// Sends a mode in the NetworkModes dictionary format.
+- (void)applySavedNoiseMode:(NSDictionary<NSString*, NSNumber*>*)saved {
     switch (saved[kNetworkModeMode].integerValue) {
         case 0:
             g_headphones->setAmbientSoundControl(true);
@@ -1912,8 +1930,44 @@ static NSMenuItem* ShortcutItem(NSString* title, id target, SEL action, NSString
             break;
     }
     [self scheduleApply];
-    [self showMessage:[NSString stringWithFormat:@"Switched to %@ for \u201c%@\u201d.", [NetworkModes describeMode:saved], network] isError:NO];
     [self refreshUI];
+}
+
+#pragma mark - Ambient Sound during calls
+
+- (void)microphoneInUseChanged {
+    if ([AudioDevices shared].microphoneInUse) {
+        if (_callRestoreMode || _state != ConnectionStateReady
+            || ![[NSUserDefaults standardUserDefaults] boolForKey:kAmbientDuringCallsKey]
+            || !(g_headphones->getCapabilities() & DEVICE_CAPABILITIES::NC_ASM))
+            return;
+        NSDictionary<NSString*, NSNumber*>* current = [self currentNoiseModeForSaving];
+        if (current[kNetworkModeMode].integerValue == NoiseModeAmbient)
+            return; // already hearing the room
+        NSDictionary* ambient = @{ kNetworkModeMode: @1, kNetworkModeLevel: @(_lastAmbientLevel - kAmbientMinLevel + 1), kNetworkModeVoice: @NO };
+        _callRestoreMode = current;
+        [self applySavedNoiseMode:ambient];
+        _callAmbientMode = [self currentNoiseModeForSaving];
+        [self showMessage:@"The microphone is in use, so the headphones switched to Ambient Sound and you can hear your own voice." isError:NO];
+        return;
+    }
+    // Apps often stop and restart the mic within a call; wait before switching back.
+    __weak ViewController* weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        [weakSelf restoreModeAfterCall];
+    });
+}
+
+- (void)restoreModeAfterCall {
+    if (!_callRestoreMode || [AudioDevices shared].microphoneInUse)
+        return;
+    NSDictionary* restore = _callRestoreMode;
+    BOOL untouched = _state == ConnectionStateReady && [[self currentNoiseModeForSaving] isEqualToDictionary:_callAmbientMode];
+    _callRestoreMode = _callAmbientMode = nil;
+    if (!untouched)
+        return; // the mode was changed by hand during the call; keep it
+    [self applySavedNoiseMode:restore];
+    [self showMessage:[NSString stringWithFormat:@"The microphone is free again; back to %@.", [NetworkModes describeMode:restore]] isError:NO];
 }
 
 - (void)refreshPlaceRow:(const HeadphonesSettings&)s {

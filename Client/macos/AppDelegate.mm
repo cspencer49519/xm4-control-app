@@ -8,6 +8,7 @@
 #import "AppDelegate.h"
 #import <ServiceManagement/ServiceManagement.h>
 #import "NetworkModes.h"
+#import "AudioDevices.h"
 
 NSString* const kHideDockIconKey = @"HideDockIconWhenHidden";
 NSString* const kAutoConnectKey = @"AutoConnectOnLaunch";
@@ -42,6 +43,8 @@ static BOOL HideDockIconEnabled(void) {
     NSWindow* _settingsWindow;
     NSButton* _launchAtLogin;
     NSStackView* _networkList;
+    NSPopUpButton* _micPopup;
+    id _audioObserver;
     id _networkObserver;
 }
 
@@ -51,6 +54,8 @@ static BOOL HideDockIconEnabled(void) {
         kAutoConnectKey: @YES,
         kLowBatteryNotifyKey: @YES,
         kNetworkModesEnabledKey: @YES,
+        kAmbientDuringCallsKey: @YES,
+        kPreferredMicKey: @"",
     }];
 }
 
@@ -144,7 +149,17 @@ static NSView* MakeNote(NSString* text) {
         _networkList.spacing = 4;
         _networkList.edgeInsets = NSEdgeInsetsMake(0, 20, 0, 0);
 
-        NSMutableArray<NSView*>* views = [NSMutableArray arrayWithArray:@[hideDock, hideDockNote, autoConnect, autoConnectNote, lowBattery, lowBatteryNote, networkModes, networkNote, _networkList]];
+        NSButton* ambientCalls = MakeCheckbox(@"Switch to Ambient Sound while the microphone is in use", kAmbientDuringCallsKey, self, @selector(toggleSetting:));
+        NSView* ambientCallsNote = MakeNote(@"Lets you hear your own voice on calls. Switches back when the call ends, unless you changed the mode during it.");
+        NSTextField* micLabel = [NSTextField labelWithString:@"Microphone:"];
+        _micPopup = [NSPopUpButton new];
+        _micPopup.target = self;
+        _micPopup.action = @selector(micChanged:);
+        NSStackView* micRow = [NSStackView stackViewWithViews:@[micLabel, _micPopup]];
+        micRow.spacing = 8;
+        NSView* micNote = MakeNote(@"Using the headphones' microphone switches them to call mode, which lowers music to mono call quality. Pick another microphone to keep it as the Mac's input whenever the headphones connect.");
+
+        NSMutableArray<NSView*>* views = [NSMutableArray arrayWithArray:@[hideDock, hideDockNote, autoConnect, autoConnectNote, lowBattery, lowBatteryNote, networkModes, networkNote, _networkList, ambientCalls, ambientCallsNote, micRow, micNote]];
         if (@available(macOS 13.0, *)) {
             _launchAtLogin = [NSButton checkboxWithTitle:@"Open at login" target:self action:@selector(toggleLaunchAtLogin:)];
             [views addObject:_launchAtLogin];
@@ -159,6 +174,9 @@ static NSView* MakeNote(NSString* text) {
         [stack setCustomSpacing:18 afterView:autoConnectNote];
         [stack setCustomSpacing:18 afterView:lowBatteryNote];
         [stack setCustomSpacing:18 afterView:_networkList];
+        [stack setCustomSpacing:18 afterView:networkNote];
+        [stack setCustomSpacing:18 afterView:ambientCallsNote];
+        [stack setCustomSpacing:18 afterView:micNote];
         stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
 
         _settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 420, 160)
@@ -174,8 +192,12 @@ static NSView* MakeNote(NSString* text) {
         _networkObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NetworkModesDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
             [weakSelf rebuildNetworkList];
         }];
+        _audioObserver = [[NSNotificationCenter defaultCenter] addObserverForName:AudioInputsDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
+            [weakSelf rebuildMicPopup];
+        }];
     }
     [self rebuildNetworkList];
+    [self rebuildMicPopup];
     if (@available(macOS 13.0, *))
         [self updateLaunchAtLogin];
     if (NSApp.activationPolicy != NSApplicationActivationPolicyRegular)
@@ -203,6 +225,39 @@ static NSView* MakeNote(NSString* text) {
         [_networkList addArrangedSubview:row];
     }
     _networkList.hidden = _networkList.arrangedSubviews.count == 0;
+}
+
+// "Headphones' microphone" plus every non-Bluetooth input (Bluetooth ones would put
+// headphones into call mode just the same).
+- (void)rebuildMicPopup {
+    NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+    NSString* preferred = [defaults stringForKey:kPreferredMicKey] ?: @"";
+    [_micPopup removeAllItems];
+    [_micPopup addItemWithTitle:@"Headphones (macOS default)"];
+    _micPopup.lastItem.representedObject = @"";
+    BOOL found = preferred.length == 0;
+    for (AudioInput* input in [AudioDevices shared].inputs) {
+        if (input.bluetooth)
+            continue;
+        [_micPopup addItemWithTitle:input.name];
+        _micPopup.lastItem.representedObject = input.uid;
+        found = found || [input.uid isEqualToString:preferred];
+    }
+    if (!found) {
+        NSString* name = [defaults stringForKey:kPreferredMicNameKey] ?: @"Saved microphone";
+        [_micPopup addItemWithTitle:[name stringByAppendingString:@" (not connected)"]];
+        _micPopup.lastItem.representedObject = preferred;
+    }
+    for (NSMenuItem* item in _micPopup.itemArray)
+        if ([item.representedObject isEqualToString:preferred])
+            [_micPopup selectItem:item];
+}
+
+- (void)micChanged:(NSPopUpButton*)sender {
+    NSString* uid = sender.selectedItem.representedObject ?: @"";
+    [[NSUserDefaults standardUserDefaults] setObject:uid forKey:kPreferredMicKey];
+    [[NSUserDefaults standardUserDefaults] setObject:uid.length ? sender.selectedItem.title : @"" forKey:kPreferredMicNameKey];
+    [[AudioDevices shared] applyPreferredMicrophone];
 }
 
 - (void)removeNetwork:(NSButton*)sender {
