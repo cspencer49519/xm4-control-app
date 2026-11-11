@@ -103,9 +103,19 @@ jobs:
         with:
           submodules: recursive
       - name: Build
+        shell: pwsh
         run: |
-          cmake -S Client -B Client/build -A x64
-          cmake --build Client/build --config Release
+          # Errors are repeated as annotations so they show on the run summary.
+          function Invoke-Logged($cmd) {
+            & $cmd[0] $cmd[1..($cmd.Length - 1)] 2>&1 | Tee-Object -FilePath build.log
+            if ($LASTEXITCODE -ne 0) {
+              Select-String -Path build.log -Pattern '(error|Error|ERROR)' | Select-Object -First 30 |
+                ForEach-Object { Write-Output "::error::$($_.Line.Trim())" }
+              exit 1
+            }
+          }
+          Invoke-Logged @('cmake', '-S', 'Client', '-B', 'Client/build', '-A', 'x64')
+          Invoke-Logged @('cmake', '--build', 'Client/build', '--config', 'Release')
       - name: Package
         shell: pwsh
         run: |
