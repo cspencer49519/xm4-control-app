@@ -1,0 +1,146 @@
+# Builds the macOS, Linux and Windows apps on every push to main and every pull
+# request, keeping the downloads as workflow artifacts. Pushing a tag like v2.0.0
+# also publishes a GitHub release with the three downloads.
+#
+# GitHub only: every job is skipped on other servers that read .github/workflows
+# (Gitea and Forgejo do).
+
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+  tests:
+    if: github.server_url == 'https://github.com'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Protocol tests (ASan/UBSan and TSan)
+        run: tests/run.sh
+
+  macos:
+    needs: version
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (Apple Silicon and Intel, ad-hoc signed)
+        working-directory: Client/macos
+        run: |
+          xcodebuild -project SonyHeadphonesClient.xcodeproj -scheme SonyHeadphonesClient \
+            -configuration Release -derivedDataPath build \
+            ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            MARKETING_VERSION="${VERSION%%-*}" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            build
+      - name: Package
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent Client/macos/build/Build/Products/Release/SonyHeadphonesClient.app \
+            "dist/SonyHeadphonesClient-${VERSION}-macOS.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  linux:
+    needs: version
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libbluetooth-dev libglew-dev libglfw3-dev libdbus-1-dev
+      - name: Build
+        run: |
+          cmake -S Client -B Client/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build Client/build -j"$(nproc)"
+      - name: Package
+        run: |
+          mkdir -p dist pkg/SonyHeadphonesClient
+          cp Client/build/SonyHeadphonesClient LICENSE pkg/SonyHeadphonesClient/
+          tar -C pkg -czf "dist/SonyHeadphonesClient-${VERSION}-linux-x86_64.tar.gz" SonyHeadphonesClient
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  windows:
+    needs: version
+    runs-on: windows-2022
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build
+        run: |
+          cmake -S Client -B Client/build -A x64
+          cmake --build Client/build --config Release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist, pkg | Out-Null
+          Copy-Item Client/build/Release/SonyHeadphonesClient.exe, LICENSE pkg/
+          Compress-Archive -Path pkg/* -DestinationPath "dist/SonyHeadphonesClient-$env:VERSION-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [tests, macos, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          ## Downloads
+
+          - **macOS** (12 or later, Apple Silicon and Intel): unzip and move `SonyHeadphonesClient.app` to Applications.
+            The app isn't notarized, so macOS blocks the first launch. Open it once, then go to
+            System Settings → Privacy & Security and click **Open Anyway**. Or run:
+            `xattr -dr com.apple.quarantine /Applications/SonyHeadphonesClient.app`
+          - **Linux** (x86_64): needs `libbluetooth`, `libglew`, `libglfw3` and `libdbus` installed.
+          - **Windows** (x64).
+
+          The macOS app is the maintained client; the Linux and Windows clients have an older, smaller feature set.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes

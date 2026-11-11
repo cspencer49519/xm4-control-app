@@ -66,6 +66,20 @@ report.
 
 They work while the app is in front.
 
+## Download
+
+Get the latest build from [Releases](https://github.com/cspencer49519/xm4-control-app/releases):
+unzip it and move `SonyHeadphonesClient.app` to Applications. The release builds aren't
+notarized, so macOS blocks the first launch. Open the app once, then go to System Settings →
+Privacy & Security and click **Open Anyway**. Or run:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/SonyHeadphonesClient.app
+```
+
+To publish a release, push a version tag: `git tag v2.0.0 && git push github v2.0.0`.
+GitHub Actions builds the macOS, Linux and Windows apps and attaches them to the release.
+
 ## Requirements
 
 - macOS 12 or later; Open at login needs macOS 13
@@ -75,7 +89,7 @@ They work while the app is in front.
 ## Build and install
 
 ```bash
-git clone --recurse-submodules git@192.168.0.50:ai-projects/xm4-control-app.git
+git clone --recurse-submodules https://github.com/cspencer49519/xm4-control-app.git
 cd xm4-control-app/Client/macos
 xcodebuild -project SonyHeadphonesClient.xcodeproj -scheme SonyHeadphonesClient \
   -configuration Release -derivedDataPath build build

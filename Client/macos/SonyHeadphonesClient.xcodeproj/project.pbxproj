@@ -349,6 +349,8 @@
 				CODE_SIGN_ENTITLEMENTS = SonyHeadphonesClient.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = "$(SRCROOT)/info.plist";
+				MARKETING_VERSION = 2.0.0;
+				CURRENT_PROJECT_VERSION = 1;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -385,6 +387,8 @@
 				CODE_SIGN_ENTITLEMENTS = SonyHeadphonesClient.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
 				INFOPLIST_FILE = "$(SRCROOT)/info.plist";
+				MARKETING_VERSION = 2.0.0;
+				CURRENT_PROJECT_VERSION = 1;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

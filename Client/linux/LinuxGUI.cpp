@@ -26,9 +26,12 @@ void EnterGUIMainLoop(BluetoothWrapper bt)
     // Setup window
     glfwSetErrorCallback(glfw_error_callback);
 
-    // GLEW usa GLX y necesita X11/XWayland.
-    // Forzar X11 incluso dentro de sesiones Wayland.
+    // GLEW uses GLX, which needs X11 (or XWayland): force X11 even in Wayland
+    // sessions. Platform selection exists from GLFW 3.4; older versions are X11-only
+    // builds anyway.
+#ifdef GLFW_PLATFORM
     glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+#endif
 
     if (!glfwInit())
     {
