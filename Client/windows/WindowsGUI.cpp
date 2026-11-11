@@ -80,7 +80,7 @@ void EnterGUIMainLoop(BluetoothWrapper bt)
 
 
 		g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
-		g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, (float*)&WINDOW_COLOR);
+		g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, (const float*)&COLOR_BG_DARK);
 		ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
 		//We need this because Present doesn't delay when the app is minimized.
